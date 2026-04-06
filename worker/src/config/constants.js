@@ -1,0 +1,10 @@
+export const MONITOR_INDEX_KEY = "monitor:index:all";
+export const MONITOR_PAGE_MAX_LIMIT = 10;
+export const INCIDENT_LIST_MAX_LIMIT = 15;
+export const INCIDENT_UPDATE_MAX_LIMIT = 15;
+export const ALERT_CHANNEL_LIST_MAX_LIMIT = 20;
+export const ALERT_EVENT_LIST_MAX_LIMIT = 20;
+export const STATUS_PAGE_LIST_MAX_LIMIT = 10;
+export const MAINTENANCE_LIST_MAX_LIMIT = 20;
+export const TEAM_MEMBER_LIST_MAX_LIMIT = 50;
+export const TEAM_INVITE_LIST_MAX_LIMIT = 50;

@@ -1,0 +1,276 @@
+export const MONITOR_COLORS = ["#36cf9b", "#7aa2ff", "#f9b532", "#f19a89", "#b794f4", "#56d0ea"];
+
+export function getInitial(email) {
+  return email?.trim()?.charAt(0)?.toUpperCase() || "U";
+}
+
+export function buildKpis(monitors, monitorStatsMap, options = {}) {
+  if (options.loading) {
+    return [
+      { label: "Total Monitors", value: "--", caption: "Configured services", valueColor: "text-[#eff3fa]" },
+      { label: "Available Now", value: "--", caption: "Healthy right now", valueColor: "text-[#36cf9b]" },
+      { label: "Down Now", value: "--", caption: "Needs attention", valueColor: "text-[#a2abb9]" },
+      { label: "Degraded", value: "--", caption: "Checking current state", valueColor: "text-[#f2c55f]" },
+      { label: "24h Uptime", value: "--", caption: "Across recent checks", valueColor: "text-[#9fb0c7]" },
+      { label: "Avg Response", value: "--", caption: "Last 24 hours", valueColor: "text-[#7aa2ff]" },
+    ];
+  }
+
+  const total = monitors.length;
+  const up = monitors.filter((monitor) => monitor.status === "UP").length;
+  const restricted = monitors.filter((monitor) => monitor.status === "UP_RESTRICTED").length;
+  const down = monitors.filter((monitor) => monitor.status === "DOWN").length;
+  const uptimeValues = Object.values(monitorStatsMap || {})
+    .map((item) => item.uptime24h)
+    .filter((value) => Number.isFinite(value));
+  const avgLatencyValues = Object.values(monitorStatsMap || {})
+    .map((item) => item.avgLatency24h)
+    .filter((value) => Number.isFinite(value));
+  const uptime24h = uptimeValues.length > 0
+    ? Math.round(uptimeValues.reduce((sum, value) => sum + value, 0) / uptimeValues.length)
+    : 0;
+  const avgLatency24h = avgLatencyValues.length > 0
+    ? Math.round(avgLatencyValues.reduce((sum, value) => sum + value, 0) / avgLatencyValues.length)
+    : null;
+
+  return [
+    { label: "Total Monitors", value: total, caption: "Configured services", valueColor: "text-[#eff3fa]" },
+    { label: "Available Now", value: up, caption: "Healthy right now", valueColor: "text-[#36cf9b]" },
+    { label: "Down Now", value: down, caption: "Needs attention", valueColor: down > 0 ? "text-[#f19a89]" : "text-[#a2abb9]" },
+    { label: "Degraded", value: restricted, caption: restricted > 0 ? "Partial responses" : "No partial responses", valueColor: "text-[#f2c55f]" },
+    { label: "24h Uptime", value: `${uptime24h}%`, caption: "Across recent checks", valueColor: "text-[#9fb0c7]" },
+    { label: "Avg Response", value: avgLatency24h != null ? `${avgLatency24h} ms` : "--", caption: "Last 24 hours", valueColor: "text-[#7aa2ff]" },
+  ];
+}
+
+export function getStatusMeta(status) {
+  switch (status) {
+    case "UP":
+      return {
+        label: "AVAILABLE",
+        dotClass: "bg-[#2fd79f]",
+        badgeClass: "bg-[#123828] text-[#69e7ba]",
+      };
+    case "DOWN":
+      return {
+        label: "DOWN",
+        dotClass: "bg-[#f19a89]",
+        badgeClass: "bg-[#402025] text-[#f6b5a8]",
+      };
+    case "UP_RESTRICTED":
+      return {
+        label: "DEGRADED",
+        dotClass: "bg-[#f2c55f]",
+        badgeClass: "bg-[#44351a] text-[#f3d088]",
+      };
+    case "MAINTENANCE":
+      return {
+        label: "MAINTENANCE",
+        dotClass: "bg-[#f2c55f]",
+        badgeClass: "bg-[#3f3217] text-[#f2cf80]",
+      };
+    default:
+      return {
+        label: "PENDING",
+        dotClass: "bg-[#8a94a3]",
+        badgeClass: "bg-[#2b323f] text-[#bcc5d2]",
+      };
+  }
+}
+
+export function buildComparisonSeries(historyByMonitor, selectedMonitorIds, range) {
+  if (!selectedMonitorIds || selectedMonitorIds.length === 0) return [];
+
+  const now = Date.now();
+  const cutoff = range === "7d" ? now - 7 * 24 * 60 * 60 * 1000 : now - 24 * 60 * 60 * 1000;
+  const bucketSizeMs = getComparisonBucketSize(range);
+
+  const bucketMap = new Map();
+  for (const monitorId of selectedMonitorIds) {
+    const entries = historyByMonitor[monitorId] || [];
+    for (const entry of entries) {
+      const ts = new Date(entry.timestamp).getTime();
+      if (!Number.isFinite(ts) || ts < cutoff) continue;
+
+      const roundedTs = bucketSizeMs > 0 ? Math.floor(ts / bucketSizeMs) * bucketSizeMs : ts;
+      const row = bucketMap.get(roundedTs) || { ts: roundedTs };
+      row[monitorId] = Number.isFinite(entry.latency) ? entry.latency : null;
+      bucketMap.set(roundedTs, row);
+    }
+  }
+
+  return [...bucketMap.values()].sort((a, b) => a.ts - b.ts);
+}
+
+export function getComparisonBucketSize(range) {
+  if (range === "7d") return 10 * 60 * 1000;
+  return 0;
+}
+
+export function buildComparisonDomain(series, selectedMonitorIds) {
+  if (!Array.isArray(series) || series.length === 0 || !Array.isArray(selectedMonitorIds) || selectedMonitorIds.length === 0) {
+    return [0, 100];
+  }
+
+  const values = [];
+  for (const row of series) {
+    for (const monitorId of selectedMonitorIds) {
+      const value = row?.[monitorId];
+      if (Number.isFinite(value)) values.push(value);
+    }
+  }
+
+  if (values.length === 0) return [0, 100];
+
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+
+  if (min === max) {
+    const padding = Math.max(10, Math.round(min * 0.2));
+    return [Math.max(0, min - padding), max + padding];
+  }
+
+  const spread = max - min;
+  const padding = Math.max(10, Math.round(spread * 0.12));
+  const lowerBound = Math.max(0, min - padding);
+  const upperBound = max + padding;
+
+  return [lowerBound, upperBound];
+}
+
+export function formatRangeTick(value, range) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "--";
+  if (range === "7d") {
+    return `${date.toLocaleDateString([], { month: "short", day: "numeric" })}`;
+  }
+  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+export function formatTooltipTime(value, range) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "--";
+  if (range === "7d") {
+    return date.toLocaleString([], {
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  }
+  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+export function formatLatencyTick(value) {
+  if (!Number.isFinite(value)) return "--";
+  if (value >= 1000) return `${(value / 1000).toFixed(1)}s`;
+  return `${Math.round(value)}ms`;
+}
+
+export function buildMonitorStatsMap(historyByMonitor) {
+  const cutoff24h = Date.now() - 24 * 60 * 60 * 1000;
+  const map = {};
+
+  Object.entries(historyByMonitor || {}).forEach(([monitorId, entries]) => {
+    const recent = (entries || []).filter((entry) => {
+      const ts = new Date(entry.timestamp).getTime();
+      return Number.isFinite(ts) && ts >= cutoff24h;
+    });
+
+    const latencyValues = recent
+      .map((entry) => entry.latency)
+      .filter((value) => Number.isFinite(value));
+    const availableCount = recent.filter((entry) => entry.status !== "DOWN").length;
+
+    map[monitorId] = {
+      uptime24h: recent.length > 0 ? Math.round((availableCount / recent.length) * 100) : null,
+      avgLatency24h: latencyValues.length > 0
+        ? Math.round(latencyValues.reduce((sum, value) => sum + value, 0) / latencyValues.length)
+        : null,
+    };
+  });
+
+  return map;
+}
+
+export function buildAttentionItems(monitors, monitorStatsMap) {
+  return [...monitors]
+    .filter((monitor) => monitor.status === "DOWN" || monitor.status === "UP_RESTRICTED")
+    .sort((a, b) => severityRank(a.status) - severityRank(b.status))
+    .slice(0, 4)
+    .map((monitor) => {
+      const status = getStatusMeta(monitor.status);
+      const stats = monitorStatsMap[monitor.id];
+      return {
+        id: monitor.id,
+        name: monitor.name,
+        label: status.label,
+        badgeClass: status.badgeClass,
+        caption: `${monitor.lastLatency != null ? `${monitor.lastLatency} ms` : "No latency"} | 24h uptime ${stats?.uptime24h ?? "--"}%`,
+      };
+    });
+}
+
+export function buildSlowMonitorBars(monitors, monitorStatsMap) {
+  return monitors
+    .map((monitor) => ({
+      id: monitor.id,
+      name: monitor.name,
+      avgLatency: monitorStatsMap[monitor.id]?.avgLatency24h ?? null,
+    }))
+    .filter((item) => Number.isFinite(item.avgLatency))
+    .sort((a, b) => b.avgLatency - a.avgLatency)
+    .slice(0, 5);
+}
+
+export function buildRecentSignals(historyByMonitor, monitors, range) {
+  const cutoff = range === "7d"
+    ? Date.now() - 7 * 24 * 60 * 60 * 1000
+    : Date.now() - 24 * 60 * 60 * 1000;
+
+  return monitors
+    .map((monitor) => {
+      const entries = [...(historyByMonitor[monitor.id] || [])].reverse();
+      for (let i = 1; i < entries.length; i += 1) {
+        const previous = entries[i - 1];
+        const current = entries[i];
+        const ts = new Date(current?.timestamp).getTime();
+        if (!Number.isFinite(ts) || ts < cutoff) continue;
+
+        if (current.status !== previous.status) {
+          const status = getStatusMeta(current.status);
+          return {
+            monitorId: monitor.id,
+            monitorName: monitor.name,
+            timestamp: current.timestamp,
+            timestampLabel: formatTooltipTime(ts, range),
+            title: `${current.status || "UNKNOWN"} from ${previous.status || "UNKNOWN"}`,
+            label: status.label,
+            badgeClass: status.badgeClass,
+          };
+        }
+      }
+      return null;
+    })
+    .filter(Boolean)
+    .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+    .slice(0, 5);
+}
+
+export function severityRank(status) {
+  if (status === "DOWN") return 0;
+  if (status === "UP_RESTRICTED") return 1;
+  return 2;
+}
+
+export function formatRelativeTime(value) {
+  const ts = new Date(value).getTime();
+  if (!Number.isFinite(ts)) return "--";
+  const diffMin = Math.max(0, Math.round((Date.now() - ts) / 60000));
+  if (diffMin < 1) return "just now";
+  if (diffMin < 60) return `${diffMin}m ago`;
+  const diffHours = Math.floor(diffMin / 60);
+  if (diffHours < 24) return `${diffHours}h ago`;
+  const diffDays = Math.floor(diffHours / 24);
+  return `${diffDays}d ago`;
+}

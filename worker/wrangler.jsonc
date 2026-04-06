@@ -1,0 +1,16 @@
+{
+  // The name of your Worker — will appear in Cloudflare dashboard
+  "name": "pingmaster-worker",
+
+  // Entry point — the file Cloudflare runs
+  "main": "src/index.js",
+
+  // Target the latest Cloudflare Workers runtime
+  "compatibility_date": "2025-01-01",
+
+  // Cron trigger — wakes up the worker automatically every 5 minutes
+  // "*/5 * * * *" is standard cron syntax: every 5 minutes, every hour, every day
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  }
+}

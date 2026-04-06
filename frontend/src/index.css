@@ -1,0 +1,68 @@
+@import 'tailwindcss';
+
+body {
+	font-size: 16px;
+	line-height: 1.5;
+}
+
+.loading-metric-block {
+	display: inline-block;
+	background: linear-gradient(90deg, #171b22 0%, #242a35 45%, #171b22 100%);
+	background-size: 200% 100%;
+	box-shadow: inset 0 0 0 1px #232a35;
+	animation: metric-shimmer 1.35s ease-in-out infinite;
+}
+
+@keyframes metric-shimmer {
+	0% {
+		background-position: 200% 0;
+	}
+	100% {
+		background-position: -200% 0;
+	}
+}
+
+.incident-pane-scroll {
+	scrollbar-width: thin;
+	scrollbar-color: #3a4352 #11151c;
+}
+
+.incident-pane-scroll::-webkit-scrollbar {
+	width: 10px;
+	height: 10px;
+}
+
+.incident-pane-scroll::-webkit-scrollbar-track {
+	background: #11151c;
+	border-radius: 999px;
+}
+
+.incident-pane-scroll::-webkit-scrollbar-thumb {
+	background: linear-gradient(180deg, #4c5668 0%, #313847 100%);
+	border: 2px solid #11151c;
+	border-radius: 999px;
+}
+
+.incident-pane-scroll::-webkit-scrollbar-thumb:hover {
+	background: linear-gradient(180deg, #647089 0%, #3d4759 100%);
+}
+
+.incident-refresh-bar {
+	position: sticky;
+	top: 0;
+	z-index: 30;
+	height: 2px;
+	width: 100%;
+	background: linear-gradient(90deg, transparent 0%, #6f8cff 18%, #7ed7b0 52%, #6f8cff 82%, transparent 100%);
+	background-size: 200% 100%;
+	animation: incident-refresh-slide 1.2s linear infinite;
+}
+
+@keyframes incident-refresh-slide {
+	0% {
+		background-position: 200% 0;
+	}
+	100% {
+		background-position: -200% 0;
+	}
+}
