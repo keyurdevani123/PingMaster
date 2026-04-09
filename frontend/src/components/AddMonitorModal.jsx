@@ -1,7 +1,7 @@
 import { useState } from "react";
-import { X } from "lucide-react";
+import { X, Globe, Tag, AlertCircle } from "lucide-react";
 
-// Simple add-monitor modal: name + URL → calls onAdd({ name, url })
+// Add-monitor modal: name + URL → calls onAdd({ name, url })
 export default function AddMonitorModal({ onClose, onAdd }) {
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
@@ -29,9 +29,8 @@ export default function AddMonitorModal({ onClose, onAdd }) {
       await onAdd({ name: name.trim(), url: trimmedUrl });
       onClose();
     } catch (err) {
-      const message = err?.message || "Could not add monitor.";
-      setError(message);
-      window.alert(message);
+      // Show error inline only — no window.alert
+      setError(err?.message || "Could not add monitor. Please try again.");
     } finally {
       setSubmitting(false);
     }
@@ -58,7 +57,12 @@ export default function AddMonitorModal({ onClose, onAdd }) {
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
-            <label className="block text-base text-[#c9d1dd] mb-1.5">Display Name</label>
+            <label className="block text-sm text-[#c9d1dd] mb-1.5 font-medium">
+              <span className="inline-flex items-center gap-1.5">
+                <Tag className="w-3.5 h-3.5" />
+                Display Name
+              </span>
+            </label>
             <input
               type="text"
               value={name}
@@ -67,26 +71,36 @@ export default function AddMonitorModal({ onClose, onAdd }) {
               maxLength={50}
               placeholder='e.g. "My Portfolio"'
               autoFocus
-              className="w-full bg-[#151b24] border border-[#2a3140] text-[#eef3fa] rounded-lg px-4 py-3 text-base focus:outline-none focus:border-[#36cf9b] transition"
+              className="w-full bg-[#151b24] border border-[#2a3140] text-[#eef3fa] rounded-lg px-4 py-3 text-base focus:outline-none focus:border-[#36cf9b] transition placeholder:text-[#4a5568]"
             />
           </div>
 
           <div>
-            <label className="block text-base text-[#c9d1dd] mb-1.5">URL</label>
+            <label className="block text-sm text-[#c9d1dd] mb-1.5 font-medium">
+              <span className="inline-flex items-center gap-1.5">
+                <Globe className="w-3.5 h-3.5" />
+                URL
+              </span>
+            </label>
             <input
               type="text"
               value={url}
               onChange={(e) => setUrl(e.target.value)}
               required
               placeholder="https://example.com"
-              className="w-full bg-[#151b24] border border-[#2a3140] text-[#eef3fa] rounded-lg px-4 py-3 text-base focus:outline-none focus:border-[#36cf9b] transition"
+              className="w-full bg-[#151b24] border border-[#2a3140] text-[#eef3fa] rounded-lg px-4 py-3 text-base focus:outline-none focus:border-[#36cf9b] transition placeholder:text-[#4a5568]"
             />
-            <p className="text-[#707987] text-sm mt-1.5">
+            <p className="text-[#707987] text-xs mt-1.5">
               Must include https:// or http://. PSI audits appear automatically only for page-style websites.
             </p>
           </div>
 
-          {error && <p className="text-[#f0a496] text-sm">{error}</p>}
+          {error && (
+            <div className="flex items-start gap-2 bg-[#2a1218] border border-[#5c2a30] rounded-lg px-3 py-2.5 text-[#f0a496] text-sm">
+              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+              <span>{error}</span>
+            </div>
+          )}
 
           <div className="flex gap-3 pt-2">
             <button
@@ -99,9 +113,9 @@ export default function AddMonitorModal({ onClose, onAdd }) {
             <button
               type="submit"
               disabled={submitting}
-              className="flex-1 h-11 bg-[#d3d6dc] hover:opacity-90 text-[#121417] font-semibold rounded-lg text-base transition"
+              className="flex-1 h-11 bg-[#d3d6dc] hover:opacity-90 text-[#121417] font-semibold rounded-lg text-base transition disabled:opacity-50"
             >
-              {submitting ? "Validating..." : "Add Monitor"}
+              {submitting ? "Validating…" : "Add Monitor"}
             </button>
           </div>
         </form>

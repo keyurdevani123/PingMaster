@@ -58,8 +58,8 @@ export async function getIncident(request, redis, auth, workspace, membership, i
 export async function createIncident(request, redis, auth, workspace, membership, env, corsHeaders, ctx = null) {
   const userId = auth.userId;
   const workspaceId = workspace.id;
-  if (membership?.role !== "owner") {
-    return json({ error: "Only workspace owners can create incidents." }, 403, corsHeaders);
+  if (![ "owner", "admin"].includes(membership?.role)) {
+    return json({ error: "Only workspace owners and admins can create incidents." }, 403, corsHeaders);
   }
 
   let body;
@@ -165,8 +165,8 @@ export async function updateIncident(request, redis, auth, workspace, membership
   if (action && !["acknowledge", "resolve", "reopen"].includes(action)) {
     return json({ error: "action must be acknowledge, resolve, or reopen" }, 400, corsHeaders);
   }
-  if ((action === "resolve" || action === "reopen") && membership?.role !== "owner") {
-    return json({ error: "Only workspace owners can resolve or reopen incidents." }, 403, corsHeaders);
+  if ((action === "resolve" || action === "reopen") && ![ "owner", "admin"].includes(membership?.role)) {
+    return json({ error: "Only workspace owners and admins can resolve or reopen incidents." }, 403, corsHeaders);
   }
 
   const nowIso = new Date().toISOString();

@@ -48,11 +48,14 @@ import {
 } from "./handlers/maintenance.js";
 import {
   acceptTeamInvite,
+  deleteTeamWorkspace,
   getTeamInvites,
   getTeamMembers,
   leaveTeamWorkspace,
+  patchMemberRole,
   postTeamWorkspace,
   postTeamInvite,
+  removeMember,
   revokeTeamInvite,
 } from "./handlers/team.js";
 import { crawlSite, pingDiagnostics, pingNow } from "./handlers/system.js";
@@ -129,6 +132,18 @@ export default {
 
     if (path === "/team/leave" && method === "POST") {
       return leaveTeamWorkspace(request, redis, auth, workspace, membership, corsHeaders);
+    }
+
+    if (path === "/team/workspaces" && method === "DELETE") {
+      return deleteTeamWorkspace(request, redis, auth, workspace, membership, corsHeaders);
+    }
+
+    if (path === "/team/members/remove" && method === "POST") {
+      return removeMember(request, redis, auth, workspace, membership, corsHeaders);
+    }
+
+    if (path.startsWith("/team/members/") && path.endsWith("/role") && method === "PATCH") {
+      return patchMemberRole(request, redis, auth, workspace, membership, corsHeaders);
     }
 
     if (path === "/monitors" && method === "POST") {

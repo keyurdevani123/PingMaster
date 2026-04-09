@@ -61,7 +61,8 @@ const CHANNEL_TYPES = [
 ];
 const ALERT_EVENTS_PAGE_SIZE = 10;
 const DEFERRED_MONITOR_LOAD_MS = 450;
-const DEFERRED_EVENTS_LOAD_MS = 2200;
+// Events are now loaded in parallel with channels/policies, not deferred,
+// so the 'Failed Deliveries' KPI resolves as soon as the page loads.
 
 export default function AlertsPage() {
   const { user, logout, currentMembershipRole, workspace } = useAuth();
@@ -132,15 +133,13 @@ export default function AlertsPage() {
 
   const scheduleDeferredLoads = useCallback(() => {
     clearDeferredLoads();
+    // Only monitors are deferred — they're only needed when editing policies.
     deferredLoadRef.current = [
       setTimeout(() => {
         loadMonitorsSection();
       }, DEFERRED_MONITOR_LOAD_MS),
-      setTimeout(() => {
-        loadEventsSection();
-      }, DEFERRED_EVENTS_LOAD_MS),
     ];
-  }, [clearDeferredLoads, loadEventsSection, loadMonitorsSection]);
+  }, [clearDeferredLoads, loadMonitorsSection]);
 
   const loadPage = useCallback(async ({ silent = false } = {}) => {
     if (!user || !workspace?.id) return;
@@ -151,9 +150,13 @@ export default function AlertsPage() {
     setError("");
 
     try {
-      const [channelItems, policySnapshot] = await Promise.all([
+      // Load channels, policies AND events in parallel.
+      // Events need to land fast so 'Failed Deliveries' KPI resolves immediately.
+      // Monitors are deferred — they're only needed when the user edits a policy.
+      const [channelItems, policySnapshot, eventItems] = await Promise.all([
         fetchAlertChannels(user),
         fetchAlertPolicies(user),
+        fetchAlertEvents(user, 30),
       ]);
 
       const normalizedDefault = normalizePolicyForForm(policySnapshot?.defaultPolicy || POLICY_FORM_DEFAULTS);
@@ -161,6 +164,9 @@ export default function AlertsPage() {
       setDefaultPolicy(normalizedDefault);
       setDraftDefaultPolicy(normalizedDefault);
       setMonitorPolicies(Array.isArray(policySnapshot?.monitorPolicies) ? policySnapshot.monitorPolicies : []);
+      setEvents(Array.isArray(eventItems) ? eventItems : []);
+      setEventsLoaded(true);
+      setEventsPage(1);
       scheduleDeferredLoads();
     } catch (err) {
       setError(err?.message || "Could not load alerts.");

@@ -1,12 +1,12 @@
 import { useState } from "react";
 import {
-  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
   signInWithPopup,
 } from "firebase/auth";
 import { auth, googleProvider } from "../firebase";
 import { useNavigate, useSearchParams, Link } from "react-router-dom";
 
-export default function Login() {
+export default function Signup() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const nextPath = searchParams.get("next") || "/dashboard";
@@ -16,24 +16,23 @@ export default function Login() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
-  // Handle email/password sign-in.
+  // Handle email/password sign-up.
   async function handleSubmit(e) {
     e.preventDefault();
     setError("");
     setLoading(true);
 
     try {
-      await signInWithEmailAndPassword(auth, email, password);
+      await createUserWithEmailAndPassword(auth, email, password);
       navigate(nextPath, { replace: true });
     } catch (err) {
-      // Firebase gives error codes like "auth/user-not-found"
       setError(getFriendlyError(err.code));
     } finally {
       setLoading(false);
     }
   }
 
-  // Handle Google sign-in.
+  // Handle Google sign-up/in.
   async function handleGoogle() {
     setError("");
     setLoading(true);
@@ -54,7 +53,7 @@ export default function Login() {
           <h1 className="text-3xl font-bold tracking-tight text-[#e7e5e5]">
             PingMaster
           </h1>
-          <p className="mt-3 text-sm text-[#acabaa]">Sign in to your dashboard</p>
+          <p className="mt-3 text-sm text-[#acabaa]">Create your account</p>
         </div>
 
         <div className="bg-[#131313] border border-[#484848]/40 rounded-xl p-7 space-y-5">
@@ -79,19 +78,14 @@ export default function Login() {
             </div>
 
             <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <label className="block text-[11px] uppercase tracking-[0.08em] text-[#acabaa]">Password</label>
-                <Link to="/forgot-password" className="text-[11px] text-[#aeb7c5] hover:text-[#d9dde4] transition hover:underline">
-                  Forgot password?
-                </Link>
-              </div>
+              <label className="block text-[11px] uppercase tracking-[0.08em] text-[#acabaa]">Password</label>
               <input
                 type="password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 required
                 minLength={6}
-                autoComplete="current-password"
+                autoComplete="new-password"
                 className="w-full h-11 bg-[#000000] border border-[#484848]/40 text-[#e7e5e5] rounded-lg px-4 focus:outline-none focus:border-[#c6c6c7]/70 transition"
                 placeholder="Min 6 characters"
               />
@@ -102,14 +96,14 @@ export default function Login() {
               disabled={loading}
               className="w-full h-11 bg-[#c6c6c7] text-[#3f4041] font-semibold rounded-xl hover:opacity-90 transition disabled:opacity-50"
             >
-              {loading ? "Please wait..." : "Sign In"}
+              {loading ? "Creating account..." : "Sign Up"}
             </button>
           </form>
 
           <div className="text-center text-sm text-[#767575] mt-4">
-            Don't have an account?{" "}
-            <Link to="/signup" className="text-[#aeb7c5] hover:text-[#d9dde4] transition hover:underline">
-              Sign up
+            Already have an account?{" "}
+            <Link to="/login" className="text-[#aeb7c5] hover:text-[#d9dde4] transition hover:underline">
+              Sign in
             </Link>
           </div>
 
@@ -141,13 +135,10 @@ export default function Login() {
 // Convert Firebase error codes to human-readable messages
 function getFriendlyError(code) {
   const errors = {
-    "auth/user-not-found": "No account found with this email.",
-    "auth/wrong-password": "Incorrect password. Try again.",
-    "auth/email-already-in-use": "This email is already registered.",
+    "auth/email-already-in-use": "This email is already registered. Please sign in.",
     "auth/weak-password": "Password must be at least 6 characters.",
     "auth/invalid-email": "Please enter a valid email address.",
-    "auth/popup-closed-by-user": "Google sign-in was cancelled.",
-    "auth/invalid-credential": "Invalid email or password.",
+    "auth/popup-closed-by-user": "Google sign-up was cancelled.",
     "auth/too-many-requests": "Too many attempts. Please try again shortly.",
   };
   return errors[code] || "Something went wrong. Please try again.";

@@ -247,8 +247,8 @@ export async function createTeamWorkspace(redis, userId, userEmail, sourceWorksp
     ? [...new Set(input.monitorIds.filter((value) => typeof value === "string" && value.trim()).map((value) => value.trim()))]
     : [];
 
-  if (!sourceWorkspace?.id || sourceWorkspace.ownerUserId !== userId || sourceWorkspace.type !== "personal") {
-    return { ok: false, error: "Team workspaces can be created only from your personal workspace." };
+  if (!sourceWorkspace?.id || sourceWorkspace.ownerUserId !== userId) {
+    return { ok: false, error: "Team workspaces can be created only by the personal workspace owner." };
   }
   if (!name) {
     return { ok: false, error: "Workspace name is required." };
@@ -272,14 +272,17 @@ export async function createTeamWorkspace(redis, userId, userEmail, sourceWorksp
     updatedAt: nowIso,
   };
 
-  const moveResult = await moveWorkspaceResources(redis, {
+  // LINK (share) monitors into the team workspace — do NOT move them.
+  // Monitors stay in the personal workspace; the team workspace collection
+  // just holds references. This allows the same monitor to be shared into
+  // multiple team workspaces simultaneously without data duplication.
+  const linkResult = await linkWorkspaceResources(redis, {
     ownerUserId: userId,
-    sourceWorkspaceId: sourceWorkspace.id,
     targetWorkspaceId: workspace.id,
     selectedMonitorIds,
   });
-  if (!moveResult.ok) {
-    return moveResult;
+  if (!linkResult.ok) {
+    return linkResult;
   }
 
   await redis.set(`workspace:${workspaceId}`, workspace);
@@ -290,7 +293,7 @@ export async function createTeamWorkspace(redis, userId, userEmail, sourceWorksp
   return {
     ok: true,
     workspace: await buildWorkspaceSummary(redis, workspace, userId),
-    movedMonitorIds: moveResult.movedMonitorIds,
+    linkedMonitorIds: linkResult.linkedMonitorIds,
   };
 }
 
@@ -410,15 +413,15 @@ async function ensureUniqueWorkspaceSlug(redis, baseSlug) {
   }
 }
 
-async function moveWorkspaceResources(redis, input) {
-  const {
-    ownerUserId,
-    sourceWorkspaceId,
-    targetWorkspaceId,
-    selectedMonitorIds,
-  } = input;
-
-  const movedMonitorIds = new Set();
+/**
+ * Link (share) selected monitors into a team workspace.
+ * Monitors are NOT moved — they stay in their current workspace (personal).
+ * The team workspace collection just gets references to these monitor IDs.
+ * This allows the same monitor to be shared into multiple team workspaces.
+ */
+async function linkWorkspaceResources(redis, input) {
+  const { ownerUserId, targetWorkspaceId, selectedMonitorIds } = input;
+  const linkedMonitorIds = new Set();
 
   for (const monitorId of selectedMonitorIds) {
     const monitor = await redis.get(`monitor:${monitorId}`);
@@ -426,32 +429,30 @@ async function moveWorkspaceResources(redis, input) {
       return { ok: false, error: "One or more selected monitors could not be found." };
     }
     if (monitor.userId !== ownerUserId) {
-      return { ok: false, error: "Only monitors owned by the workspace owner can be shared." };
+      return { ok: false, error: "Only monitors owned by you can be shared into a team workspace." };
     }
     if (monitor.type === "child") {
       return { ok: false, error: "Choose parent monitors only when creating a team workspace." };
     }
-    if (monitor.workspaceId !== sourceWorkspaceId) {
-      return { ok: false, error: "One or more selected monitors are not available in the current workspace." };
-    }
 
-    await moveMonitorBundle(redis, monitor, sourceWorkspaceId, targetWorkspaceId);
-    movedMonitorIds.add(monitor.id);
+    await linkMonitorBundle(redis, monitor, targetWorkspaceId);
+    linkedMonitorIds.add(monitor.id);
 
     const childIds = await redis.lrange(`monitor:${monitor.id}:children`, 0, -1);
     for (const childId of Array.isArray(childIds) ? childIds : []) {
-      if (!childId) continue;
-      movedMonitorIds.add(childId);
+      if (childId) linkedMonitorIds.add(childId);
     }
   }
 
-  await moveIncidentsForMonitors(redis, sourceWorkspaceId, targetWorkspaceId, [...movedMonitorIds]);
-  await moveMaintenancesForMonitors(redis, sourceWorkspaceId, targetWorkspaceId, [...movedMonitorIds]);
-
-  return { ok: true, movedMonitorIds: [...movedMonitorIds] };
+  return { ok: true, linkedMonitorIds: [...linkedMonitorIds] };
 }
 
-async function moveMonitorBundle(redis, monitor, sourceWorkspaceId, targetWorkspaceId) {
+/**
+ * Add a monitor (and its children) to the team workspace collection
+ * WITHOUT changing its workspaceId. The monitor stays "owned" by its
+ * original workspace but is now also visible in the team workspace.
+ */
+async function linkMonitorBundle(redis, monitor, targetWorkspaceId) {
   const bundleIds = [monitor.id];
   const childIds = await redis.lrange(`monitor:${monitor.id}:children`, 0, -1);
   for (const childId of Array.isArray(childIds) ? childIds : []) {
@@ -459,59 +460,73 @@ async function moveMonitorBundle(redis, monitor, sourceWorkspaceId, targetWorksp
   }
 
   for (const monitorId of bundleIds) {
-    const next = await redis.get(`monitor:${monitorId}`);
-    if (!next) continue;
-    const previousWorkspaceId = next.workspaceId || sourceWorkspaceId;
-    next.workspaceId = targetWorkspaceId;
-    next.updatedAt = new Date().toISOString();
-    await redis.set(`monitor:${monitorId}`, next);
-    await redis.lrem(`user:${next.userId}:monitors`, 0, monitorId);
-    await removeWorkspaceMembership(redis, previousWorkspaceId, "monitors", monitorId);
+    const m = await redis.get(`monitor:${monitorId}`);
+    if (!m) continue;
+    // Add to team workspace collection (no workspaceId mutation)
     await ensureWorkspaceMembership(redis, targetWorkspaceId, "monitors", monitorId);
-    if (next.url) {
-      await redis.del(`workspace:${previousWorkspaceId}:monitor_url:${next.url}`);
-      await redis.set(`workspace:${targetWorkspaceId}:monitor_url:${next.url}`, monitorId);
+    // Set URL index for the team workspace so duplicate detection still works
+    if (m.url) {
+      await redis.set(`workspace:${targetWorkspaceId}:monitor_url:${m.url}`, monitorId);
     }
   }
 }
 
-async function moveIncidentsForMonitors(redis, sourceWorkspaceId, targetWorkspaceId, movedMonitorIds) {
-  if (!Array.isArray(movedMonitorIds) || movedMonitorIds.length === 0) return;
-  const movedSet = new Set(movedMonitorIds);
-  const incidentIds = await getWorkspaceCollectionIds(redis, sourceWorkspaceId, "incidents", null, -1);
+/**
+ * Delete a team workspace.
+ * Rules:
+ *  - Only the owner can delete.
+ *  - Only allowed when the owner is the sole active member (no accepted invitees).
+ * Effect (link-based model):
+ *  - Removes the team workspace's monitor/incident/maintenance collection references.
+ *  - Does NOT move monitors back — they were never moved, so personal workspace still has them.
+ *  - Removes all member records, invite records, and workspace keys.
+ */
+export async function deleteWorkspace(redis, workspace, userId) {
+  if (!workspace?.id) return { ok: false, error: "Workspace not found." };
+  if (workspace.ownerUserId !== userId) return { ok: false, error: "Only the workspace owner can delete it." };
+  if (workspace.type === "personal") return { ok: false, error: "Personal workspaces cannot be deleted." };
 
-  for (const incidentId of Array.isArray(incidentIds) ? incidentIds : []) {
-    if (!incidentId) continue;
-    const incident = await redis.get(`incident:${incidentId}`);
-    if (!incident || !movedSet.has(incident.monitorId)) continue;
-    incident.workspaceId = targetWorkspaceId;
-    incident.updatedAt = new Date().toISOString();
-    await redis.set(`incident:${incidentId}`, incident);
-    await redis.lrem(`user:${incident.userId}:incidents`, 0, incidentId);
-    await removeWorkspaceMembership(redis, sourceWorkspaceId, "incidents", incidentId);
-    await ensureWorkspaceMembership(redis, targetWorkspaceId, "incidents", incidentId);
+  // Confirm sole membership
+  const memberIds = await redis.lrange(getWorkspaceMembersKey(workspace.id), 0, 99);
+  const dedupedIds = [...new Set((Array.isArray(memberIds) ? memberIds : []).filter(Boolean))];
+  const activeMemberships = await Promise.all(
+    dedupedIds.map((mid) => getWorkspaceMembership(redis, workspace.id, mid))
+  );
+  const activeOthers = activeMemberships.filter(
+    (m) => m?.status === "active" && m.userId !== userId
+  );
+  if (activeOthers.length > 0) {
+    return {
+      ok: false,
+      error: `Cannot delete while ${activeOthers.length} other member${activeOthers.length > 1 ? "s are" : " is"} still active. Remove them first.`,
+    };
   }
-}
 
-async function moveMaintenancesForMonitors(redis, sourceWorkspaceId, targetWorkspaceId, movedMonitorIds) {
-  if (!Array.isArray(movedMonitorIds) || movedMonitorIds.length === 0) return;
-  const movedSet = new Set(movedMonitorIds);
-  const maintenanceIds = await getWorkspaceCollectionIds(redis, sourceWorkspaceId, "maintenances", null, -1);
-
-  for (const maintenanceId of Array.isArray(maintenanceIds) ? maintenanceIds : []) {
-    if (!maintenanceId) continue;
-    const maintenance = await redis.get(`maintenance:${maintenanceId}`);
-    if (!maintenance || maintenance.workspaceId !== sourceWorkspaceId) continue;
-    const maintenanceMonitorIds = Array.isArray(maintenance.monitorIds) ? maintenance.monitorIds : [];
-    if (maintenanceMonitorIds.length === 0) continue;
-
-    const allMoved = maintenanceMonitorIds.every((monitorId) => movedSet.has(monitorId));
-    if (!allMoved) continue;
-
-    maintenance.workspaceId = targetWorkspaceId;
-    maintenance.updatedAt = new Date().toISOString();
-    await redis.set(`maintenance:${maintenanceId}`, maintenance);
-    await removeWorkspaceMembership(redis, sourceWorkspaceId, "maintenances", maintenanceId);
-    await ensureWorkspaceMembership(redis, targetWorkspaceId, "maintenances", maintenanceId);
+  // Clean up team workspace URL indexes (monitors themselves stay untouched)
+  const monitorIds = await getWorkspaceCollectionIds(redis, workspace.id, "monitors", null, -1);
+  for (const monitorId of monitorIds) {
+    const monitor = await redis.get(`monitor:${monitorId}`);
+    if (monitor?.url) {
+      await redis.del(`workspace:${workspace.id}:monitor_url:${monitor.url}`);
+    }
   }
+
+  // Remove all member records
+  for (const memberId of dedupedIds) {
+    await redis.del(getWorkspaceMemberKey(workspace.id, memberId));
+    await redis.lrem(getUserWorkspaceMembershipsKey(memberId), 0, workspace.id);
+  }
+
+  // Remove workspace-level collections and the workspace record itself
+  await redis.del(getWorkspaceMembersKey(workspace.id));
+  await redis.del(getWorkspaceCollectionKey(workspace.id, "monitors"));
+  await redis.del(getWorkspaceCollectionKey(workspace.id, "incidents"));
+  await redis.del(getWorkspaceCollectionKey(workspace.id, "maintenances"));
+  await redis.del(getWorkspaceInvitesKey(workspace.id));
+  await redis.del(`workspace_monitor_summary:${workspace.id}`);
+  if (workspace.slug) await redis.del(`workspace:slug:${workspace.slug}`);
+  await redis.lrem(`user:${userId}:workspaces`, 0, workspace.id);
+  await redis.del(`workspace:${workspace.id}`);
+
+  return { ok: true };
 }

@@ -1,8 +1,29 @@
 @import 'tailwindcss';
 
 body {
+	font-family: 'Inter', system-ui, -apple-system, sans-serif;
+	-webkit-font-smoothing: antialiased;
+	-moz-osx-font-smoothing: grayscale;
 	font-size: 16px;
 	line-height: 1.5;
+	background-color: #08090b;
+}
+
+/* Global Custom Scrollbar */
+::-webkit-scrollbar {
+	width: 10px;
+	height: 10px;
+}
+::-webkit-scrollbar-track {
+	background: #08090b;
+}
+::-webkit-scrollbar-thumb {
+	background: #1e2430;
+	border: 2px solid #08090b;
+	border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover {
+	background: #2a3140;
 }
 
 .loading-metric-block {
@@ -17,6 +38,7 @@ body {
 	0% {
 		background-position: 200% 0;
 	}
+
 	100% {
 		background-position: -200% 0;
 	}
@@ -62,7 +84,25 @@ body {
 	0% {
 		background-position: 200% 0;
 	}
+
 	100% {
 		background-position: -200% 0;
+	}
+}
+
+/* Delete confirm card fade-in */
+.animate-fade-in {
+	animation: fade-in 0.15s ease-out both;
+}
+
+@keyframes fade-in {
+	from {
+		opacity: 0;
+		transform: scale(0.97);
+	}
+
+	to {
+		opacity: 1;
+		transform: scale(1);
 	}
 }

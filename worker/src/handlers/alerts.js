@@ -25,8 +25,8 @@ export async function getAlertChannels(request, redis, auth, workspace, membersh
 }
 
 export async function createAlertChannel(request, redis, auth, workspace, membership, corsHeaders) {
-  if (membership?.role !== "owner") {
-    return json({ error: "Only workspace owners can manage alert channels." }, 403, corsHeaders);
+  if (![ "owner", "admin"].includes(membership?.role)) {
+    return json({ error: "Only workspace owners and admins can manage alert channels." }, 403, corsHeaders);
   }
 
   let body;
@@ -44,8 +44,8 @@ export async function createAlertChannel(request, redis, auth, workspace, member
 }
 
 export async function updateAlertChannel(request, redis, auth, workspace, membership, channelId, corsHeaders) {
-  if (membership?.role !== "owner") {
-    return json({ error: "Only workspace owners can manage alert channels." }, 403, corsHeaders);
+  if (![ "owner", "admin"].includes(membership?.role)) {
+    return json({ error: "Only workspace owners and admins can manage alert channels." }, 403, corsHeaders);
   }
   const existing = await loadAlertChannel(redis, channelId);
   if (!existing) return json({ error: "Channel not found" }, 404, corsHeaders);
@@ -67,8 +67,8 @@ export async function updateAlertChannel(request, redis, auth, workspace, member
 }
 
 export async function testAlertChannel(request, redis, auth, workspace, membership, channelId, env, corsHeaders) {
-  if (membership?.role !== "owner") {
-    return json({ error: "Only workspace owners can test alert channels." }, 403, corsHeaders);
+  if (![ "owner", "admin"].includes(membership?.role)) {
+    return json({ error: "Only workspace owners and admins can test alert channels." }, 403, corsHeaders);
   }
   const channel = await loadAlertChannel(redis, channelId);
   if (!channel) return json({ error: "Channel not found" }, 404, corsHeaders);
@@ -84,8 +84,8 @@ export async function getAlertPolicies(request, redis, auth, workspace, membersh
 }
 
 export async function putDefaultAlertPolicy(request, redis, auth, workspace, membership, corsHeaders) {
-  if (membership?.role !== "owner") {
-    return json({ error: "Only workspace owners can update alert rules." }, 403, corsHeaders);
+  if (![ "owner", "admin"].includes(membership?.role)) {
+    return json({ error: "Only workspace owners and admins can update alert rules." }, 403, corsHeaders);
   }
 
   let body;
@@ -109,8 +109,8 @@ export async function putDefaultAlertPolicy(request, redis, auth, workspace, mem
 }
 
 export async function putMonitorAlertPolicy(request, redis, auth, workspace, membership, monitorId, corsHeaders) {
-  if (membership?.role !== "owner") {
-    return json({ error: "Only workspace owners can update alert rules." }, 403, corsHeaders);
+  if (![ "owner", "admin"].includes(membership?.role)) {
+    return json({ error: "Only workspace owners and admins can update alert rules." }, 403, corsHeaders);
   }
 
   const monitor = await redis.get(`monitor:${monitorId}`);

@@ -1,5 +1,10 @@
 import { json } from "../lib/http.js";
-import { createTeamWorkspace } from "../services/workspaces.js";
+import {
+  createTeamWorkspace,
+  deleteWorkspace,
+  getWorkspaceMembership,
+  removeWorkspaceMemberRecord,
+} from "../services/workspaces.js";
 import {
   acceptWorkspaceInvite,
   createWorkspaceInvite,
@@ -131,4 +136,60 @@ export async function leaveTeamWorkspace(request, redis, auth, workspace, member
   const result = await leaveWorkspace(redis, workspace, auth.userId);
   if (!result.ok) return json({ error: result.error }, 400, corsHeaders);
   return json({ success: true }, 200, corsHeaders);
+}
+
+export async function deleteTeamWorkspace(request, redis, auth, workspace, membership, corsHeaders) {
+  if (membership?.role !== "owner") {
+    return json({ error: "Only the workspace owner can delete it." }, 403, corsHeaders);
+  }
+  const result = await deleteWorkspace(redis, workspace, auth.userId);
+  if (!result.ok) return json({ error: result.error }, 400, corsHeaders);
+  return json({ success: true, restoredToWorkspaceId: result.restoredToWorkspaceId }, 200, corsHeaders);
+}
+
+export async function removeMember(request, redis, auth, workspace, membership, corsHeaders) {
+  if (membership?.role !== "owner") {
+    return json({ error: "Only the workspace owner can remove members." }, 403, corsHeaders);
+  }
+  let body;
+  try { body = await request.json(); } catch {
+    return json({ error: "Invalid JSON body" }, 400, corsHeaders);
+  }
+  const targetUserId = typeof body?.userId === "string" ? body.userId.trim() : "";
+  if (!targetUserId || targetUserId === auth.userId) {
+    return json({ error: "Provide a valid member user ID to remove (cannot remove yourself)." }, 400, corsHeaders);
+  }
+  const targetMembership = await getWorkspaceMembership(redis, workspace.id, targetUserId);
+  if (!targetMembership || targetMembership.status !== "active") {
+    return json({ error: "Member not found in this workspace." }, 404, corsHeaders);
+  }
+  await removeWorkspaceMemberRecord(redis, workspace.id, targetUserId);
+  return json({ success: true }, 200, corsHeaders);
+}
+export async function patchMemberRole(request, redis, auth, workspace, membership, corsHeaders) {
+  if (membership?.role !== "owner") {
+    return json({ error: "Only the workspace owner can change member roles." }, 403, corsHeaders);
+  }
+  let body;
+  try { body = await request.json(); } catch {
+    return json({ error: "Invalid JSON body" }, 400, corsHeaders);
+  }
+  const targetUserId = typeof body?.userId === "string" ? body.userId.trim() : "";
+  const newRole = typeof body?.role === "string" ? body.role.trim() : "";
+  if (!targetUserId || targetUserId === auth.userId) {
+    return json({ error: "Provide a valid member user ID (cannot change your own role)." }, 400, corsHeaders);
+  }
+  if (![ "admin", "member"].includes(newRole)) {
+    return json({ error: "Role must be 'admin' or 'member'." }, 400, corsHeaders);
+  }
+  const targetMembership = await getWorkspaceMembership(redis, workspace.id, targetUserId);
+  if (!targetMembership || targetMembership.status !== "active") {
+    return json({ error: "Member not found in this workspace." }, 404, corsHeaders);
+  }
+  if (targetMembership.role === "owner") {
+    return json({ error: "Cannot change the role of another owner." }, 400, corsHeaders );
+  }
+  const memberKey = `workspace:${workspace.id}:member:${targetUserId}`;
+  await redis.set(memberKey, { ...targetMembership, role: newRole });
+  return json({ success: true, userId: targetUserId, role: newRole }, 200, corsHeaders);
 }

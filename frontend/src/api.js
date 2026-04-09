@@ -1,4 +1,4 @@
-﻿// All communication between the React frontend and the Cloudflare Worker goes here.
+// All communication between the React frontend and the Cloudflare Worker goes here.
 // The Worker is running at localhost:8787 in development.
 // In production, this will be your deployed Worker URL.
 
@@ -455,6 +455,20 @@ export async function removeTeamMember(user, targetUserId) {
   const payload = await res.json().catch(() => ({}));
   if (!res.ok) {
     throw new Error(payload?.error || "Failed to remove member");
+  }
+  invalidateTeamApiCache(user.uid);
+  return payload;
+}
+
+export async function updateMemberRole(user, targetUserId, newRole) {
+  const res = await fetch(`${WORKER_URL}/team/members/${targetUserId}/role`, {
+    method: "PATCH",
+    headers: await authHeaders(user),
+    body: JSON.stringify({ userId: targetUserId, role: newRole }),
+  });
+  const payload = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(payload?.error || "Failed to update member role");
   }
   invalidateTeamApiCache(user.uid);
   return payload;

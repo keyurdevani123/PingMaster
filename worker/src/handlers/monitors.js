@@ -14,6 +14,62 @@ import {
 
 const WORKSPACE_SUMMARY_CACHE_MS = 10 * 60 * 1000;
 
+// ── Helpers ────────────────────────────────────────────────────────────────────
+
+/**
+ * Batch-fetch monitor objects in a single Redis MGET instead of N serial GETs.
+ * Returns { monitors, staleIds } — stale IDs are those with no record in Redis.
+ */
+async function batchGetMonitors(redis, ids) {
+  if (!ids || ids.length === 0) return { monitors: [], staleIds: [] };
+  const keys = ids.map((id) => `monitor:${id}`);
+  const results = await redis.mget(...keys);
+  const monitors = [];
+  const staleIds = [];
+  for (let i = 0; i < ids.length; i++) {
+    const record = results[i];
+    if (!record) {
+      staleIds.push(ids[i]);
+    } else {
+      monitors.push(record);
+    }
+  }
+  return { monitors, staleIds };
+}
+
+/**
+ * Batch-fetch monitor_summary objects in a single Redis MGET.
+ * Returns a map of monitorId → summaryObject (or null).
+ */
+async function batchGetSummaries(redis, monitorIds) {
+  if (!monitorIds || monitorIds.length === 0) return {};
+  const keys = monitorIds.map((id) => `monitor_summary:${id}`);
+  const results = await redis.mget(...keys);
+  const map = {};
+  for (let i = 0; i < monitorIds.length; i++) {
+    map[monitorIds[i]] = results[i] || null;
+  }
+  return map;
+}
+
+/**
+ * Prune stale IDs from workspace membership and user list simultaneously.
+ * Avoids repeated individual lrem/srem calls by batching where possible.
+ */
+async function pruneStaleIds(redis, workspaceId, fallbackKey, staleIds) {
+  if (!staleIds || staleIds.length === 0) return;
+  await Promise.all(
+    staleIds.map((id) =>
+      Promise.all([
+        removeWorkspaceMembership(redis, workspaceId, "monitors", id),
+        fallbackKey ? redis.lrem(fallbackKey, 0, id) : Promise.resolve(),
+      ])
+    )
+  );
+}
+
+// ── Handlers ───────────────────────────────────────────────────────────────────
+
 export async function addMonitor(request, redis, userId, workspaceId, corsHeaders) {
   let body;
   try {
@@ -97,55 +153,61 @@ export async function getMonitors(request, redis, userId, workspaceId, corsHeade
 
   const fallbackKey = isPersonalWorkspaceId(workspaceId) ? `user:${userId}:monitors` : null;
   const allIds = await getWorkspaceCollectionIds(redis, workspaceId, "monitors", fallbackKey, -1);
-  const validMonitors = [];
-  const staleIds = [];
-  for (const id of allIds) {
-    const monitor = await redis.get(`monitor:${id}`);
-    if (!monitor) {
-      staleIds.push(id);
-      continue;
-    }
-    validMonitors.push(monitor);
-  }
 
+  // Batch fetch all monitors in ONE Redis MGET (eliminates N serial GETs)
+  const { monitors: allValidMonitors, staleIds } = await batchGetMonitors(redis, allIds);
+
+  // Prune stale IDs asynchronously (no need to wait serially)
   if (staleIds.length > 0) {
-    for (const staleId of staleIds) {
-      await removeWorkspaceMembership(redis, workspaceId, "monitors", staleId);
-      if (fallbackKey) {
-        await redis.lrem(fallbackKey, 0, staleId);
-      }
-    }
+    await pruneStaleIds(redis, workspaceId, fallbackKey, staleIds);
   }
 
-  const pageMonitors = validMonitors.slice(safeCursor, safeCursor + safeLimit);
+  const pageMonitors = allValidMonitors.slice(safeCursor, safeCursor + safeLimit);
   if (pageMonitors.length === 0) {
     return json({ items: [], nextCursor: null, limit: safeLimit }, 200, corsHeaders);
   }
 
-  for (const monitor of pageMonitors) {
-    if (monitor) {
-      await ensureWorkspaceScopedRecord(redis, `monitor:${monitor.id}`, monitor, workspaceId, "monitors");
-      const summary = await redis.get(`monitor_summary:${monitor.id}`);
-      if (summary) {
-        monitor.metrics24h = {
-          windowSize: summary.windowSize ?? null,
-          uptime24h: summary.uptime24h ?? null,
-          avgLatency24h: summary.avgLatency24h ?? null,
-          degradedChecks24h: summary.degradedChecks24h ?? 0,
-          downChecks24h: summary.downChecks24h ?? 0,
-        };
-        await redis.set(`monitor:${monitor.id}`, monitor);
-      }
-    }
-  }
+  // Batch fetch all summaries in ONE Redis MGET
+  const pageMonitorIds = pageMonitors.map((m) => m.id).filter(Boolean);
+  const summaryMap = await batchGetSummaries(redis, pageMonitorIds);
+
+  // Apply summaries to monitor objects — READ ONLY (no write-back on read path).
+  // Metrics are already updated during ping events; writing here would cause
+  // unnecessary write amplification at scale (N writes per GET /monitors call).
   const items = pageMonitors
     .filter(Boolean)
-    .map((monitor) => attachPsiCapability(monitor))
-    .filter((monitor) => includeChildren || monitor.type !== "child");
+    .map((monitor) => {
+      const summary = summaryMap[monitor.id];
+      const enriched = summary
+        ? {
+            ...monitor,
+            metrics24h: {
+              windowSize: summary.windowSize ?? null,
+              uptime24h: summary.uptime24h ?? null,
+              avgLatency24h: summary.avgLatency24h ?? null,
+              degradedChecks24h: summary.degradedChecks24h ?? 0,
+              downChecks24h: summary.downChecks24h ?? 0,
+            },
+          }
+        : monitor;
+      return attachPsiCapability(enriched);
+    })
+    .filter((m) => includeChildren || m.type !== "child");
 
-  const nextCursor = safeCursor + pageMonitors.length < validMonitors.length
-    ? String(safeCursor + pageMonitors.length)
-    : null;
+  // Ensure workspace scoping ONLY for personal workspace reads, where the monitor
+  // might pre-date workspace collections. For team workspaces, monitors are LINKED
+  // (not moved) — we must NOT overwrite their original workspaceId.
+  if (isPersonalWorkspaceId(workspaceId)) {
+    Promise.all(
+      pageMonitors.map((m) => ensureWorkspaceScopedRecord(redis, `monitor:${m.id}`, m, workspaceId, "monitors"))
+    ).catch(() => { /* best-effort */ });
+  }
+
+  const nextCursor =
+    safeCursor + pageMonitors.length < allValidMonitors.length
+      ? String(safeCursor + pageMonitors.length)
+      : null;
+
   return json({ items, nextCursor, limit: safeLimit }, 200, corsHeaders);
 }
 
@@ -158,30 +220,45 @@ export async function getMonitorSummary(request, redis, userId, workspaceId, cor
 export async function deleteMonitor(request, redis, userId, workspaceId, id, corsHeaders) {
   const monitor = await redis.get(`monitor:${id}`);
   if (!monitor) return json({ success: true }, 200, corsHeaders);
-  if (monitor.workspaceId && monitor.workspaceId !== workspaceId) return json({ error: "Forbidden" }, 403, corsHeaders);
-  if (!monitor.workspaceId && monitor.userId !== userId) return json({ error: "Forbidden" }, 403, corsHeaders);
+  // Allow delete if the monitor belongs to this workspace OR if the requesting user owns the monitor
+  // (covers the case where a monitor's workspaceId is the personal workspace but is shared/linked
+  // into a team workspace, so the owner can still delete it from any of their workspaces).
+  const inThisWorkspace = monitor.workspaceId === workspaceId;
+  const isOwner = monitor.userId === userId;
+  if (!inThisWorkspace && !isOwner)
+    return json({ error: "Forbidden" }, 403, corsHeaders);
+  if (!isOwner)
+    return json({ error: "Forbidden" }, 403, corsHeaders);
 
   if (monitor.type !== "child") {
     const childIds = await redis.lrange(`monitor:${id}:children`, 0, -1);
     if (Array.isArray(childIds) && childIds.length > 0) {
-      for (const childId of childIds) {
-        const child = await redis.get(`monitor:${childId}`);
-        if (child?.url) {
-          const childCanonicalUrl = getBaseEndpoint(child.url);
-          if (childCanonicalUrl) {
-            await redis.del(`user:${userId}:monitor_url:${childCanonicalUrl}`);
-            if (monitor.workspaceId) {
-              await redis.del(`workspace:${monitor.workspaceId}:monitor_url:${childCanonicalUrl}`);
+      // Batch-fetch child monitors to get their URLs for index cleanup
+      const { monitors: children } = await batchGetMonitors(redis, childIds);
+      // Delete all children in parallel
+      await Promise.all(
+        children.map(async (child) => {
+          if (child?.url) {
+            const childCanonicalUrl = getBaseEndpoint(child.url);
+            if (childCanonicalUrl) {
+              await Promise.all([
+                redis.del(`user:${userId}:monitor_url:${childCanonicalUrl}`),
+                monitor.workspaceId
+                  ? redis.del(`workspace:${monitor.workspaceId}:monitor_url:${childCanonicalUrl}`)
+                  : Promise.resolve(),
+              ]);
             }
           }
-        }
-        await redis.del(`monitor:${childId}`);
-        await redis.lrem(`user:${userId}:monitors`, 0, childId);
-        await removeWorkspaceMembership(redis, monitor.workspaceId || `ws_${userId}`, "monitors", childId);
-        await redis.srem(MONITOR_INDEX_KEY, childId);
-        await redis.del(`history:${childId}`);
-        await redis.del(`monitor_summary:${childId}`);
-      }
+          await Promise.all([
+            redis.del(`monitor:${child.id}`),
+            redis.lrem(`user:${userId}:monitors`, 0, child.id),
+            removeWorkspaceMembership(redis, monitor.workspaceId || `ws_${userId}`, "monitors", child.id),
+            redis.srem(MONITOR_INDEX_KEY, child.id),
+            redis.del(`history:${child.id}`),
+            redis.del(`monitor_summary:${child.id}`),
+          ]);
+        })
+      );
       await redis.del(`monitor:${id}:children`);
     }
   } else if (monitor.parentId) {
@@ -191,21 +268,26 @@ export async function deleteMonitor(request, redis, userId, workspaceId, id, cor
   if (monitor.url) {
     const canonicalUrl = getBaseEndpoint(monitor.url);
     if (canonicalUrl) {
-      await redis.del(`user:${userId}:monitor_url:${canonicalUrl}`);
-      if (monitor.workspaceId) {
-        await redis.del(`workspace:${monitor.workspaceId}:monitor_url:${canonicalUrl}`);
-      }
+      await Promise.all([
+        redis.del(`user:${userId}:monitor_url:${canonicalUrl}`),
+        monitor.workspaceId
+          ? redis.del(`workspace:${monitor.workspaceId}:monitor_url:${canonicalUrl}`)
+          : Promise.resolve(),
+      ]);
     }
   }
 
-  await redis.del(`monitor:${id}`);
-  await redis.lrem(`user:${userId}:monitors`, 0, id);
-  await removeWorkspaceMembership(redis, monitor.workspaceId || `ws_${userId}`, "monitors", id);
-  await redis.srem(MONITOR_INDEX_KEY, id);
-  await redis.del(`history:${id}`);
-  await redis.del(`monitor_summary:${id}`);
-  await invalidateWorkspaceStatusPageCaches(redis, monitor.workspaceId || `ws_${userId}`);
-  await invalidateWorkspaceMonitorSummary(redis, monitor.workspaceId || `ws_${userId}`);
+  const ownerWorkspaceId = monitor.workspaceId || `ws_${userId}`;
+  await Promise.all([
+    redis.del(`monitor:${id}`),
+    redis.lrem(`user:${userId}:monitors`, 0, id),
+    removeWorkspaceMembership(redis, ownerWorkspaceId, "monitors", id),
+    redis.srem(MONITOR_INDEX_KEY, id),
+    redis.del(`history:${id}`),
+    redis.del(`monitor_summary:${id}`),
+  ]);
+  await invalidateWorkspaceStatusPageCaches(redis, ownerWorkspaceId);
+  await invalidateWorkspaceMonitorSummary(redis, ownerWorkspaceId);
 
   return json({ success: true }, 200, corsHeaders);
 }
@@ -213,29 +295,28 @@ export async function deleteMonitor(request, redis, userId, workspaceId, id, cor
 export async function getChildMonitors(request, redis, userId, workspaceId, parentId, corsHeaders) {
   const parent = await redis.get(`monitor:${parentId}`);
   if (!parent) return json({ error: "Monitor not found" }, 404, corsHeaders);
-  if (parent.workspaceId && parent.workspaceId !== workspaceId) return json({ error: "Forbidden" }, 403, corsHeaders);
-  if (!parent.workspaceId && parent.userId !== userId) return json({ error: "Forbidden" }, 403, corsHeaders);
+  if (parent.workspaceId && parent.workspaceId !== workspaceId)
+    return json({ error: "Forbidden" }, 403, corsHeaders);
+  if (!parent.workspaceId && parent.userId !== userId)
+    return json({ error: "Forbidden" }, 403, corsHeaders);
 
   const childIds = await redis.lrange(`monitor:${parentId}:children`, 0, -1);
   if (!Array.isArray(childIds) || childIds.length === 0) return json([], 200, corsHeaders);
 
-  const seen = new Set();
-  const children = [];
-  for (const childId of childIds) {
-    if (seen.has(childId)) continue;
-    seen.add(childId);
-    const child = await redis.get(`monitor:${childId}`);
-    if (child) children.push(attachPsiCapability(child));
-  }
+  // Deduplicate IDs then batch fetch
+  const uniqueIds = [...new Set(childIds)];
+  const { monitors: children } = await batchGetMonitors(redis, uniqueIds);
 
-  return json(children, 200, corsHeaders);
+  return json(children.map((child) => attachPsiCapability(child)), 200, corsHeaders);
 }
 
 export async function addChildMonitors(request, redis, userId, workspaceId, parentId, corsHeaders) {
   const parent = await redis.get(`monitor:${parentId}`);
   if (!parent) return json({ error: "Monitor not found" }, 404, corsHeaders);
-  if (parent.workspaceId && parent.workspaceId !== workspaceId) return json({ error: "Forbidden" }, 403, corsHeaders);
-  if (!parent.workspaceId && parent.userId !== userId) return json({ error: "Forbidden" }, 403, corsHeaders);
+  if (parent.workspaceId && parent.workspaceId !== workspaceId)
+    return json({ error: "Forbidden" }, 403, corsHeaders);
+  if (!parent.workspaceId && parent.userId !== userId)
+    return json({ error: "Forbidden" }, 403, corsHeaders);
 
   let body;
   try {
@@ -252,9 +333,8 @@ export async function addChildMonitors(request, redis, userId, workspaceId, pare
   const existingChildIds = await redis.lrange(`monitor:${parentId}:children`, 0, -1);
   const existingChildUrls = new Set();
   if (Array.isArray(existingChildIds) && existingChildIds.length > 0) {
-    for (const childId of existingChildIds) {
-      const child = await redis.get(`monitor:${childId}`);
-      if (!child?.url) continue;
+    const { monitors: existingChildren } = await batchGetMonitors(redis, existingChildIds);
+    for (const child of existingChildren) {
       const canonicalChildUrl = getBaseEndpoint(child.url);
       if (canonicalChildUrl) existingChildUrls.add(canonicalChildUrl);
     }
@@ -307,11 +387,11 @@ export async function addChildMonitors(request, redis, userId, workspaceId, pare
     childMonitor.lastContentType = firstResult.contentType || "";
     Object.assign(childMonitor, attachPsiCapability(childMonitor, firstResult.contentType));
 
-      await redis.set(`monitor:${childId}`, childMonitor);
-      if (isPersonalWorkspaceId(workspaceId)) {
-        await redis.lpush(`user:${userId}:monitors`, childId);
-      }
-      await ensureWorkspaceMembership(redis, workspaceId, "monitors", childId);
+    await redis.set(`monitor:${childId}`, childMonitor);
+    if (isPersonalWorkspaceId(workspaceId)) {
+      await redis.lpush(`user:${userId}:monitors`, childId);
+    }
+    await ensureWorkspaceMembership(redis, workspaceId, "monitors", childId);
     await redis.lpush(`monitor:${parentId}:children`, childId);
     await redis.sadd(MONITOR_INDEX_KEY, childId);
     await redis.set(urlIndexKey, childId);
@@ -346,8 +426,10 @@ export async function addChildMonitors(request, redis, userId, workspaceId, pare
 export async function getHistory(request, redis, userId, workspaceId, id, corsHeaders) {
   const monitor = await redis.get(`monitor:${id}`);
   if (!monitor) return json({ error: "Monitor not found" }, 404, corsHeaders);
-  if (monitor.workspaceId && monitor.workspaceId !== workspaceId) return json({ error: "Forbidden" }, 403, corsHeaders);
-  if (!monitor.workspaceId && monitor.userId !== userId) return json({ error: "Forbidden" }, 403, corsHeaders);
+  if (monitor.workspaceId && monitor.workspaceId !== workspaceId)
+    return json({ error: "Forbidden" }, 403, corsHeaders);
+  if (!monitor.workspaceId && monitor.userId !== userId)
+    return json({ error: "Forbidden" }, 403, corsHeaders);
 
   const url = new URL(request.url);
   const rawLimit = Number.parseInt(url.searchParams.get("limit") || "288", 10);
@@ -359,8 +441,10 @@ export async function getHistory(request, redis, userId, workspaceId, id, corsHe
 export async function updateMonitorEndpoints(request, redis, userId, workspaceId, id, corsHeaders) {
   const monitor = await redis.get(`monitor:${id}`);
   if (!monitor) return json({ error: "Monitor not found" }, 404, corsHeaders);
-  if (monitor.workspaceId && monitor.workspaceId !== workspaceId) return json({ error: "Forbidden" }, 403, corsHeaders);
-  if (!monitor.workspaceId && monitor.userId !== userId) return json({ error: "Forbidden" }, 403, corsHeaders);
+  if (monitor.workspaceId && monitor.workspaceId !== workspaceId)
+    return json({ error: "Forbidden" }, 403, corsHeaders);
+  if (!monitor.workspaceId && monitor.userId !== userId)
+    return json({ error: "Forbidden" }, 403, corsHeaders);
 
   let body;
   try {
@@ -385,14 +469,18 @@ export async function updateMonitorEndpoints(request, redis, userId, workspaceId
 export async function pingSingle(request, redis, userId, workspaceId, id, env, corsHeaders, ctx = null) {
   const monitor = await redis.get(`monitor:${id}`);
   if (!monitor) return json({ error: "Monitor not found" }, 404, corsHeaders);
-  if (monitor.workspaceId && monitor.workspaceId !== workspaceId) return json({ error: "Forbidden" }, 403, corsHeaders);
-  if (!monitor.workspaceId && monitor.userId !== userId) return json({ error: "Forbidden" }, 403, corsHeaders);
+  if (monitor.workspaceId && monitor.workspaceId !== workspaceId)
+    return json({ error: "Forbidden" }, 403, corsHeaders);
+  if (!monitor.workspaceId && monitor.userId !== userId)
+    return json({ error: "Forbidden" }, 403, corsHeaders);
 
   const { historyEntry } = await pingMonitor(redis, monitor, env, {
     waitUntil: ctx?.waitUntil?.bind(ctx),
   });
   return json({ monitor, history: historyEntry }, 200, corsHeaders);
 }
+
+// ── Workspace monitor summary (with cache) ─────────────────────────────────────
 
 async function getWorkspaceMonitorSummary(redis, workspaceId, fallbackKey = null) {
   const cacheKey = `workspace_monitor_summary:${workspaceId}`;
@@ -403,55 +491,55 @@ async function getWorkspaceMonitorSummary(redis, workspaceId, fallbackKey = null
   }
 
   const ids = await getWorkspaceCollectionIds(redis, workspaceId, "monitors", fallbackKey, -1);
-  const monitors = [];
-  const staleIds = [];
-  for (const id of ids) {
-    const monitor = await redis.get(`monitor:${id}`);
-    if (!monitor) {
-      staleIds.push(id);
-      continue;
-    }
-    if (monitor.type === "child") continue;
-    const summary = await redis.get(`monitor_summary:${monitor.id}`);
-    if (summary) {
-      monitor.metrics24h = {
+
+  // Batch fetch all monitors in ONE Redis MGET
+  const { monitors: allMonitors, staleIds } = await batchGetMonitors(redis, ids);
+
+  if (staleIds.length > 0) {
+    await pruneStaleIds(redis, workspaceId, fallbackKey, staleIds);
+  }
+
+  // Filter to parent monitors only, then batch fetch their summaries
+  const parentMonitors = allMonitors.filter((m) => m.type !== "child");
+  const parentIds = parentMonitors.map((m) => m.id);
+  const summaryMap = await batchGetSummaries(redis, parentIds);
+
+  // Enrich monitors with their summaries (read-only)
+  const enrichedMonitors = parentMonitors.map((m) => {
+    const summary = summaryMap[m.id];
+    if (!summary) return m;
+    return {
+      ...m,
+      metrics24h: {
         windowSize: summary.windowSize ?? null,
         uptime24h: summary.uptime24h ?? null,
         avgLatency24h: summary.avgLatency24h ?? null,
         degradedChecks24h: summary.degradedChecks24h ?? 0,
         downChecks24h: summary.downChecks24h ?? 0,
-      };
-    }
-    monitors.push(monitor);
-  }
+      },
+    };
+  });
 
-  if (staleIds.length > 0) {
-    for (const staleId of staleIds) {
-      await removeWorkspaceMembership(redis, workspaceId, "monitors", staleId);
-      if (fallbackKey) {
-        await redis.lrem(fallbackKey, 0, staleId);
-      }
-    }
-  }
-
-  const uptimeValues = monitors
-    .map((monitor) => monitor?.metrics24h?.uptime24h)
-    .filter((value) => Number.isFinite(value));
-  const latencyValues = monitors
-    .map((monitor) => monitor?.metrics24h?.avgLatency24h)
-    .filter((value) => Number.isFinite(value));
+  const uptimeValues = enrichedMonitors
+    .map((m) => m?.metrics24h?.uptime24h)
+    .filter((v) => Number.isFinite(v));
+  const latencyValues = enrichedMonitors
+    .map((m) => m?.metrics24h?.avgLatency24h)
+    .filter((v) => Number.isFinite(v));
 
   const payload = {
-    totalMonitors: monitors.length,
-    availableNow: monitors.filter((monitor) => monitor.status === "UP").length,
-    downNow: monitors.filter((monitor) => monitor.status === "DOWN").length,
-    degradedNow: monitors.filter((monitor) => monitor.status === "UP_RESTRICTED").length,
-    uptime24h: uptimeValues.length > 0
-      ? Math.round(uptimeValues.reduce((sum, value) => sum + value, 0) / uptimeValues.length)
-      : null,
-    avgResponse24h: latencyValues.length > 0
-      ? Math.round(latencyValues.reduce((sum, value) => sum + value, 0) / latencyValues.length)
-      : null,
+    totalMonitors: enrichedMonitors.length,
+    availableNow: enrichedMonitors.filter((m) => m.status === "UP").length,
+    downNow: enrichedMonitors.filter((m) => m.status === "DOWN").length,
+    degradedNow: enrichedMonitors.filter((m) => m.status === "UP_RESTRICTED").length,
+    uptime24h:
+      uptimeValues.length > 0
+        ? Math.round(uptimeValues.reduce((sum, v) => sum + v, 0) / uptimeValues.length)
+        : null,
+    avgResponse24h:
+      latencyValues.length > 0
+        ? Math.round(latencyValues.reduce((sum, v) => sum + v, 0) / latencyValues.length)
+        : null,
     generatedAt: new Date().toISOString(),
   };
   await redis.set(cacheKey, payload);

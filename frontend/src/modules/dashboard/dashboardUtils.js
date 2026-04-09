@@ -5,6 +5,7 @@ export function getInitial(email) {
 }
 
 export function buildKpis(monitors, monitorStatsMap, options = {}) {
+  // Phase 1: summary data available — fast, authoritative
   if (options.summary) {
     const summary = options.summary;
     return [
@@ -17,21 +18,18 @@ export function buildKpis(monitors, monitorStatsMap, options = {}) {
     ];
   }
 
-  if (options.loading) {
-    return [
-      { label: "Total Monitors", value: "--", caption: "Configured services", valueColor: "text-[#eff3fa]" },
-      { label: "Available Now", value: "--", caption: "Healthy right now", valueColor: "text-[#36cf9b]" },
-      { label: "Down Now", value: "--", caption: "Needs attention", valueColor: "text-[#a2abb9]" },
-      { label: "Degraded", value: "--", caption: "Checking current state", valueColor: "text-[#f2c55f]" },
-      { label: "24h Uptime", value: "--", caption: "Across recent checks", valueColor: "text-[#9fb0c7]" },
-      { label: "Avg Response", value: "--", caption: "Last 24 hours", valueColor: "text-[#7aa2ff]" },
-    ];
-  }
-
+  // Phase 2: summary still loading — show all as shimmer or derive basic counts from
+  // the monitor list (Total, Available, Down, Degraded resolve fast from first page).
+  // 24h Uptime and Avg Response MUST wait for summary (they need server-side aggregation).
   const total = monitors.length;
-  const up = monitors.filter((monitor) => monitor.status === "UP").length;
-  const restricted = monitors.filter((monitor) => monitor.status === "UP_RESTRICTED").length;
-  const down = monitors.filter((monitor) => monitor.status === "DOWN").length;
+  const up = monitors.filter((m) => m.status === "UP").length;
+  const restricted = monitors.filter((m) => m.status === "UP_RESTRICTED").length;
+  const down = monitors.filter((m) => m.status === "DOWN").length;
+
+  // If summary is still loading, shimmer the aggregated metrics.
+  // If summary permanently failed (loading=false, summary=null), fall back to computed values.
+  const summaryLoading = options.loading !== false; // default to true (shimmer) if unknown
+
   const uptimeValues = Object.values(monitorStatsMap || {})
     .map((item) => item.uptime24h)
     .filter((value) => Number.isFinite(value));
@@ -40,18 +38,20 @@ export function buildKpis(monitors, monitorStatsMap, options = {}) {
     .filter((value) => Number.isFinite(value));
   const uptime24h = uptimeValues.length > 0
     ? Math.round(uptimeValues.reduce((sum, value) => sum + value, 0) / uptimeValues.length)
-    : 0;
+    : null;
   const avgLatency24h = avgLatencyValues.length > 0
     ? Math.round(avgLatencyValues.reduce((sum, value) => sum + value, 0) / avgLatencyValues.length)
     : null;
 
   return [
-    { label: "Total Monitors", value: total, caption: "Configured services", valueColor: "text-[#eff3fa]" },
-    { label: "Available Now", value: up, caption: "Healthy right now", valueColor: "text-[#36cf9b]" },
-    { label: "Down Now", value: down, caption: "Needs attention", valueColor: down > 0 ? "text-[#f19a89]" : "text-[#a2abb9]" },
-    { label: "Degraded", value: restricted, caption: restricted > 0 ? "Partial responses" : "No partial responses", valueColor: "text-[#f2c55f]" },
-    { label: "24h Uptime", value: `${uptime24h}%`, caption: "Across recent checks", valueColor: "text-[#9fb0c7]" },
-    { label: "Avg Response", value: avgLatency24h != null ? `${avgLatency24h} ms` : "--", caption: "Last 24 hours", valueColor: "text-[#7aa2ff]" },
+    // These 4 resolve from first monitor page — no need to wait for summary.
+    { label: "Total Monitors", value: options.loading && total === 0 ? "--" : total, caption: "Configured services", valueColor: "text-[#eff3fa]" },
+    { label: "Available Now", value: options.loading && total === 0 ? "--" : up, caption: "Healthy right now", valueColor: "text-[#36cf9b]" },
+    { label: "Down Now", value: options.loading && total === 0 ? "--" : down, caption: "Needs attention", valueColor: down > 0 ? "text-[#f19a89]" : "text-[#a2abb9]" },
+    { label: "Degraded", value: options.loading && total === 0 ? "--" : restricted, caption: restricted > 0 ? "Partial responses" : "No partial responses", valueColor: "text-[#f2c55f]" },
+    // These 2 need server aggregation — stay as "--" while summary is pending.
+    { label: "24h Uptime", value: summaryLoading ? "--" : (uptime24h != null ? `${uptime24h}%` : "0%"), caption: "Across recent checks", valueColor: "text-[#9fb0c7]" },
+    { label: "Avg Response", value: summaryLoading ? "--" : (avgLatency24h != null ? `${avgLatency24h} ms` : "--"), caption: "Last 24 hours", valueColor: "text-[#7aa2ff]" },
   ];
 }
 

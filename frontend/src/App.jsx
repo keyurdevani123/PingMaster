@@ -5,6 +5,8 @@ import ProtectedRoute from "./components/ProtectedRoute";
 
 const Home = lazy(() => import("./pages/Home"));
 const Login = lazy(() => import("./pages/Login"));
+const Signup = lazy(() => import("./pages/Signup"));
+const ForgotPassword = lazy(() => import("./pages/ForgotPassword"));
 const Dashboard = lazy(() => import("./pages/Dashboard"));
 const Alerts = lazy(() => import("./pages/Alerts"));
 const Incidents = lazy(() => import("./pages/Incidents"));
@@ -28,6 +30,8 @@ function App() {
             {/* Public route — anyone can visit */}
             <Route path="/" element={<Home />} />
             <Route path="/login" element={<Login />} />
+            <Route path="/signup" element={<Signup />} />
+            <Route path="/forgot-password" element={<ForgotPassword />} />
             <Route path="/status/:slug" element={<PublicStatusPage />} />
 
             {/* Protected route — only logged-in users can see this */}
