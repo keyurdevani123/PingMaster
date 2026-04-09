@@ -253,10 +253,6 @@ export default function MonitorDetailsPage() {
 
   async function handleRunPsi() {
     if (!monitor?.url) return;
-    if (monitor.psiEligible === false) {
-      setPsiError(monitor.psiReason || "PageSpeed Insights is available only for webpage-style monitors that return HTML.");
-      return;
-    }
     setPsiLoading(true);
     setPsiError("");
     try {
@@ -555,13 +551,8 @@ export default function MonitorDetailsPage() {
     return () => clearTimeout(timerId);
   }, [isChildMonitor, loadMonitorMaintenances, maintenanceLoaded, maintenanceLoading, monitor?.id, tab]);
 
-  useEffect(() => {
-    if (tab !== "ai-report" || aiReportLoaded || aiReportLoading || !monitor?.id) return undefined;
-    const timerId = setTimeout(() => {
-      loadAiReport();
-    }, 300);
-    return () => clearTimeout(timerId);
-  }, [aiReportLoaded, aiReportLoading, loadAiReport, monitor?.id, tab]);
+  // AI Report: NOT auto-loaded. User must click "Generate" manually.
+  // loadAiReport() is called from the Generate button inside MonitorAiReportTab.
 
   if (loading) {
     return (
@@ -1016,7 +1007,7 @@ export default function MonitorDetailsPage() {
                 </div>
 
                 <p className="hidden">
-                  Selected: {selectedEndpoints.size} • Suggestions: {allEndpoints.length}
+                  Selected: {selectedEndpoints.size} â€¢ Suggestions: {allEndpoints.length}
                 </p>
 
                 <div className="rounded-lg border border-[#252a33] bg-[#12161d] px-3 py-2.5 text-sm text-[#8d94a0] flex flex-wrap items-center gap-x-4 gap-y-1">
@@ -1071,7 +1062,7 @@ export default function MonitorDetailsPage() {
                               <p className="text-base text-[#e8edf7] font-medium truncate">{child.name}</p>
                               <p className="text-xs text-[#8d94a0] truncate">{child.url}</p>
                               <p className="text-xs text-[#708090] mt-1">
-                                Status Code: {child.lastStatusCode ?? "--"} • Last Check: {child.lastChecked ? formatTimestamp(child.lastChecked) : "--"}
+                                Status Code: {child.lastStatusCode ?? "--"} â€¢ Last Check: {child.lastChecked ? formatTimestamp(child.lastChecked) : "--"}
                               </p>
                             </div>
                             <div className="text-right shrink-0">

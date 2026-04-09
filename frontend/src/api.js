@@ -1,4 +1,4 @@
-// All communication between the React frontend and the Cloudflare Worker goes here.
+﻿// All communication between the React frontend and the Cloudflare Worker goes here.
 // The Worker is running at localhost:8787 in development.
 // In production, this will be your deployed Worker URL.
 
@@ -75,7 +75,7 @@ export async function fetchSessionBootstrap(user, workspaceId = currentWorkspace
 export async function fetchMonitors(user, options = {}) {
   const userId = user.uid;
   const includeChildren = options.includeChildren === true;
-  const scope = getWorkspaceCacheScope();
+  const scope = options.workspaceId || getWorkspaceCacheScope();
   const cacheKey = includeChildren ? `monitors:${userId}:${scope}:all` : `monitors:${userId}:${scope}:parents`;
   const cached = readApiCache(cacheKey, API_CACHE_TTL_MS);
   if (Array.isArray(cached)) return cached;
@@ -93,7 +93,12 @@ export async function fetchMonitors(user, options = {}) {
   const limit = 100;
 
   while (true) {
-    const page = await fetchMonitorsPage(user, { includeChildren, limit, cursor });
+    const page = await fetchMonitorsPage(user, { 
+      includeChildren, 
+      limit, 
+      cursor, 
+      workspaceId: options.workspaceId 
+    });
     const items = Array.isArray(page?.items) ? page.items : [];
     allItems.push(...items);
 
@@ -113,6 +118,60 @@ export async function fetchMonitors(user, options = {}) {
 
   writeApiCache(cacheKey, uniqueItems);
   return uniqueItems;
+}
+
+/**
+ * Streams monitors page-by-page, calling onBatch(items) as each page arrives.
+ * This allows the UI to render monitors progressively without waiting for all pages.
+ * The full list is also written to cache at the end.
+ *
+ * @param {import("firebase/auth").User} user
+ * @param {(items: object[]) => void} onBatch  Called with each page's items as they arrive
+ * @param {object} options
+ */
+export async function fetchMonitorsStream(user, onBatch, options = {}) {
+  const userId = user.uid;
+  const includeChildren = options.includeChildren === true;
+  const scope = getWorkspaceCacheScope();
+  const cacheKey = includeChildren ? `monitors:${userId}:${scope}:all` : `monitors:${userId}:${scope}:parents`;
+
+  // If we have a full cached list, deliver it immediately as one batch.
+  const cached = readApiCache(cacheKey, API_CACHE_TTL_MS);
+  if (Array.isArray(cached)) {
+    onBatch(cached);
+    return cached;
+  }
+  if (cached && !Array.isArray(cached)) {
+    apiCache.delete(cacheKey);
+    try { localStorage.removeItem(`api-cache:${cacheKey}`); } catch { /* ignore */ }
+  }
+
+  const allItems = [];
+  const seen = new Set();
+  let cursor = 0;
+  const limit = 100;
+
+  while (true) {
+    const page = await fetchMonitorsPage(user, { includeChildren, limit, cursor });
+    const raw = Array.isArray(page?.items) ? page.items : [];
+    const batch = [];
+    for (const item of raw) {
+      if (!item?.id || seen.has(item.id)) continue;
+      seen.add(item.id);
+      const normalized = normalizeMonitorPsiCapability(item);
+      allItems.push(normalized);
+      batch.push(normalized);
+    }
+    if (batch.length > 0) onBatch(batch);
+
+    if (page?.nextCursor == null) break;
+    const next = Number.parseInt(page.nextCursor, 10);
+    if (!Number.isFinite(next) || next <= cursor) break;
+    cursor = next;
+  }
+
+  writeApiCache(cacheKey, allItems);
+  return allItems;
 }
 
 export async function fetchMonitorSummary(user) {
@@ -140,7 +199,8 @@ export async function fetchMonitorsPage(user, options = {}) {
     monitorUrl.searchParams.set("includeChildren", "true");
   }
 
-  const res = await fetch(monitorUrl.toString(), { headers: await authHeaders(user) });
+  const headers = await authHeaders(user, options.workspaceId);
+  const res = await fetch(monitorUrl.toString(), { headers });
   if (!res.ok) throw new Error("Failed to fetch monitor page");
   return res.json();
 }
@@ -372,6 +432,34 @@ export async function leaveTeamWorkspace(user) {
   clearApiCache();
   return payload;
 }
+
+export async function deleteTeamWorkspace(user) {
+  const res = await fetch(`${WORKER_URL}/team/workspaces`, {
+    method: "DELETE",
+    headers: await authHeaders(user),
+  });
+  const payload = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(payload?.error || "Failed to delete workspace");
+  }
+  clearApiCache();
+  return payload;
+}
+
+export async function removeTeamMember(user, targetUserId) {
+  const res = await fetch(`${WORKER_URL}/team/members/remove`, {
+    method: "POST",
+    headers: await authHeaders(user),
+    body: JSON.stringify({ userId: targetUserId }),
+  });
+  const payload = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(payload?.error || "Failed to remove member");
+  }
+  invalidateTeamApiCache(user.uid);
+  return payload;
+}
+
 
 export async function fetchMonitorWorkspace(user, monitorId, options = {}) {
   const historyLimit = Number.isFinite(options.historyLimit)
@@ -984,16 +1072,28 @@ export async function runPageSpeedAudit(url, strategy = "mobile") {
     endpoint.searchParams.set("key", apiKey);
   }
 
-  const res = await fetch(endpoint.toString());
+  let res;
+  try {
+    res = await fetch(endpoint.toString());
+  } catch (networkErr) {
+    throw new Error("Could not reach Google PageSpeed Insights. Check your internet connection and try again.");
+  }
   if (!res.ok) {
     let message = "Could not run the PageSpeed audit for this target.";
     try {
       const body = await res.json();
       if (body?.error?.message) {
         message = formatPageSpeedErrorMessage(body.error.message, normalizedUrl);
+      } else if (body?.error?.code) {
+        message = formatPageSpeedErrorMessage(`HTTP ${body.error.code}`, normalizedUrl);
       }
     } catch {
-      // Ignore JSON parse failure.
+      // Ignore JSON parse failure - use status code for context
+      if (res.status === 400) message = "Google PageSpeed Insights could not read this URL. Check that it is a public http/https webpage.";
+      else if (res.status === 403) message = "PageSpeed API key is invalid or missing. Check your VITE_PAGESPEED_API_KEY setting.";
+      else if (res.status === 429) message = "PageSpeed Insights is rate-limited. Wait a moment and try again.";
+      else if (res.status >= 500) message = "Google PageSpeed Insights is temporarily unavailable. Try again shortly.";
+      else message = `PageSpeed Insights returned an unexpected error (HTTP ${res.status}).`;
     }
     throw new Error(message);
   }
@@ -1099,13 +1199,35 @@ function invalidateUserApiCache(userId, monitorId) {
   const allKeys = new Set([...apiCache.keys(), ...getPersistedApiCacheKeys()]);
   for (const key of allKeys) {
     if (!key.includes(`:${userId}`)) continue;
-    if (monitorId && !key.includes(`:${monitorId}`) && !key.startsWith(`monitors:${userId}`)) continue;
+    // Always purge monitor-summary, monitor list, and monitor-workspace keys.
+    // Previously, monitor-summary keys were never swept on add/delete/ping,
+    // causing KPI cards to show stale values for up to 2 full minutes.
+    const isMonitorSummary = key.startsWith(`monitor-summary:`);
+    const isMonitorList = key.startsWith(`monitors:${userId}`);
+    const isMonitorWorkspace = key.startsWith(`monitor-workspace:`);
+    const isGeneralUserKey = key.includes(`:${userId}`);
+    if (monitorId && !isMonitorSummary && !isMonitorList && !isMonitorWorkspace) {
+      if (!key.includes(`:${monitorId}`)) continue;
+    }
+    if (!isMonitorSummary && !isMonitorList && !isMonitorWorkspace && !isGeneralUserKey) continue;
     apiCache.delete(key);
     try {
       localStorage.removeItem(`api-cache:${key}`);
     } catch {
       // Ignore storage remove errors.
     }
+  }
+}
+
+/** Explicitly evict a specific monitor-summary cache entry (called after dashboard KPI-mutating actions). */
+export function invalidateMonitorSummaryCache(userId) {
+  const scope = getWorkspaceCacheScope();
+  const cacheKey = `monitor-summary:${userId}:${scope}`;
+  apiCache.delete(cacheKey);
+  try {
+    localStorage.removeItem(`api-cache:${cacheKey}`);
+  } catch {
+    // Ignore storage errors.
   }
 }
 

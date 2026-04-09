@@ -1,4 +1,4 @@
-import { Fragment, useMemo, useState } from "react";
+﻿import { Fragment, useMemo, useState } from "react";
 import { ExternalLink, RefreshCw, Monitor, Smartphone } from "lucide-react";
 import { buildPsiViewModel } from "../utils/psi";
 
@@ -16,7 +16,7 @@ export default function MonitorPsiTab({
 }) {
   const [expandedAuditIds, setExpandedAuditIds] = useState(new Set());
   const viewModel = useMemo(() => buildPsiViewModel(psiData), [psiData]);
-  const canRunAudit = psiEligible !== false;
+  const canRunAudit = true;
 
   function toggleAuditDetails(auditId) {
     setExpandedAuditIds((prev) => {
@@ -42,78 +42,66 @@ export default function MonitorPsiTab({
             </p>
           </div>
 
-          {canRunAudit ? (
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => onStrategyChange("desktop")}
-                className={`h-9 px-3 rounded-lg text-sm border inline-flex items-center gap-2 ${
-                  psiStrategy === "desktop"
-                    ? "bg-[#d3d6dc] text-[#111317] border-[#d3d6dc]"
-                    : "border-[#2a2f39] text-[#9ca3af] bg-transparent"
-                }`}
-              >
-                <Monitor className="w-3.5 h-3.5" />
-                Desktop
-              </button>
-              <button
-                type="button"
-                onClick={() => onStrategyChange("mobile")}
-                className={`h-9 px-3 rounded-lg text-sm border inline-flex items-center gap-2 ${
-                  psiStrategy === "mobile"
-                    ? "bg-[#d3d6dc] text-[#111317] border-[#d3d6dc]"
-                    : "border-[#2a2f39] text-[#9ca3af] bg-transparent"
-                }`}
-              >
-                <Smartphone className="w-3.5 h-3.5" />
-                Mobile
-              </button>
-              <button
-                type="button"
-                onClick={onRunAudit}
-                disabled={psiLoading}
-                className="h-9 px-4 rounded-lg bg-[#d3d6dc] text-[#111317] text-sm font-semibold inline-flex items-center gap-2 disabled:opacity-50"
-              >
-                <RefreshCw className={`w-3.5 h-3.5 ${psiLoading ? "animate-spin" : ""}`} />
-                {psiLoading ? "Running..." : "Run Audit"}
-              </button>
-            </div>
-          ) : (
-            <div className="rounded-lg border border-[#2a2f39] bg-[#12161d] px-3 py-2 text-sm text-[#c9d1dd]">
-              PSI not available for this target
-            </div>
-          )}
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => onStrategyChange("desktop")}
+              className={`h-9 px-3 rounded-lg text-sm border inline-flex items-center gap-2 ${
+                psiStrategy === "desktop"
+                  ? "bg-[#d3d6dc] text-[#111317] border-[#d3d6dc]"
+                  : "border-[#2a2f39] text-[#9ca3af] bg-transparent"
+              }`}
+            >
+              <Monitor className="w-3.5 h-3.5" />
+              Desktop
+            </button>
+            <button
+              type="button"
+              onClick={() => onStrategyChange("mobile")}
+              className={`h-9 px-3 rounded-lg text-sm border inline-flex items-center gap-2 ${
+                psiStrategy === "mobile"
+                  ? "bg-[#d3d6dc] text-[#111317] border-[#d3d6dc]"
+                  : "border-[#2a2f39] text-[#9ca3af] bg-transparent"
+              }`}
+            >
+              <Smartphone className="w-3.5 h-3.5" />
+              Mobile
+            </button>
+            <button
+              type="button"
+              onClick={onRunAudit}
+              disabled={psiLoading}
+              className="h-9 px-4 rounded-lg bg-[#d3d6dc] text-[#111317] text-sm font-semibold inline-flex items-center gap-2 disabled:opacity-50"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${psiLoading ? "animate-spin" : ""}`} />
+              {psiLoading ? "Running..." : "Run Audit"}
+            </button>
+          </div>
         </div>
 
         {psiError && <p className="text-sm text-[#f0a496] mt-3">{psiError}</p>}
 
-        {!canRunAudit && (
-          <div className="mt-4 rounded-xl border border-[#252a33] bg-[#12161d] p-4 space-y-3">
+        {psiEligible === false && (
+          <div className="mt-4 rounded-xl border border-[#2a3040] bg-[#141821] p-3.5 flex items-start gap-3">
+            <span className="mt-0.5 shrink-0 text-yellow-400">⚠</span>
             <div>
-              <p className="text-sm font-medium text-[#edf2fb]">Performance audits are not available for this monitor</p>
-              <p className="text-sm text-[#9ca3af] mt-1">
-                {psiReason || "PSI is available only for webpage-style monitors that return HTML."}
+              <p className="text-sm font-medium text-[#d6dce7]">This target may not be a standard webpage</p>
+              <p className="text-xs text-[#8d94a0] mt-1">
+                {psiReason || "PSI works best on public HTML pages. You can still run the audit — Google\u2019s API will report if this URL is unsupported."}
               </p>
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
-              <InfoRow label="Target" value={monitorName || monitorUrl || "--"} />
-              <InfoRow label="Still monitored for" value="Uptime, latency, status changes, alerts" />
             </div>
           </div>
         )}
 
-        {/* Score cards */}
-        {canRunAudit && (
+        {/* Score cards - always shown, empty before first audit */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4">
           {viewModel.scoreCards.map((item) => (
             <ScoreCard key={item.label} item={item} />
           ))}
         </div>
-        )}
       </section>
 
-      {!canRunAudit ? null : (
-        <>
+      <>
       {/* Side-by-side: Lab vs Real-User */}
       <section className="grid grid-cols-1 xl:grid-cols-2 gap-5">
         {/* Lab metrics */}
@@ -241,8 +229,7 @@ export default function MonitorPsiTab({
           </div>
         )}
       </section>
-        </>
-      )}
+      </>
     </section>
   );
 }
