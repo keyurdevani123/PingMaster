@@ -31,6 +31,7 @@ import AddMonitorModal from "../../components/AddMonitorModal";
 import { useAuth } from "../../context/AuthContext";
 import {
   fetchMonitors,
+  fetchMonitorSummary,
   createMonitor,
   deleteMonitor,
   fetchHistory,
@@ -58,9 +59,11 @@ export default function DashboardPage() {
   const isTeamWorkspace = workspace?.type === "team";
 
   const [monitors, setMonitors] = useState([]);
+  const [monitorSummary, setMonitorSummary] = useState(null);
   const [history, setHistory] = useState({});
   const [showModal, setShowModal] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [summaryLoading, setSummaryLoading] = useState(true);
   const [pingingAll, setPingingAll] = useState(false);
   const [pingingMonitors, setPingingMonitors] = useState({});
   const [error, setError] = useState("");
@@ -83,15 +86,6 @@ export default function DashboardPage() {
 
       if (isTeamWorkspace) {
         setHistory({});
-      } else {
-        const entries = await Promise.all(
-          data.map((monitor) =>
-            fetchHistory(user, monitor.id, 288)
-              .then((items) => [monitor.id, items])
-              .catch(() => [monitor.id, []])
-          )
-        );
-        setHistory(Object.fromEntries(entries));
       }
     } catch {
       setError("Could not load monitors. Is the Worker running?");
@@ -100,10 +94,56 @@ export default function DashboardPage() {
     }
   }, [isTeamWorkspace, user, workspace?.id]);
 
+  const loadMonitorSummary = useCallback(async () => {
+    if (!user || !workspace?.id) return;
+    setSummaryLoading(true);
+    try {
+      const summary = await fetchMonitorSummary(user);
+      setMonitorSummary(summary);
+    } catch {
+      setMonitorSummary(null);
+    } finally {
+      setSummaryLoading(false);
+    }
+  }, [user, workspace?.id]);
+
   useEffect(() => {
     if (!user || !workspace?.id) return;
+    loadMonitorSummary();
     loadMonitors();
-  }, [user, workspace?.id, loadMonitors]);
+  }, [user, workspace?.id, loadMonitorSummary, loadMonitors]);
+
+  useEffect(() => {
+    if (!user || !workspace?.id || isTeamWorkspace || selectedMonitorIds.length === 0) return;
+
+    let active = true;
+    const missingIds = selectedMonitorIds.filter((monitorId) => !history[monitorId]);
+    if (missingIds.length === 0) return undefined;
+
+    (async () => {
+      try {
+        const entries = await Promise.all(
+          missingIds.map((monitorId) =>
+            fetchHistory(user, monitorId, 288)
+              .then((items) => [monitorId, items])
+              .catch(() => [monitorId, []])
+          )
+        );
+        if (!active) return;
+        setHistory((prev) => ({
+          ...prev,
+          ...Object.fromEntries(entries),
+        }));
+      } catch {
+        if (!active) return;
+        setError("Could not load chart history for the selected monitors.");
+      }
+    })();
+
+    return () => {
+      active = false;
+    };
+  }, [history, isTeamWorkspace, selectedMonitorIds, user, workspace?.id]);
 
   async function handlePingSingle(monitorId) {
     setPingingMonitors((prev) => ({ ...prev, [monitorId]: true }));
@@ -114,6 +154,7 @@ export default function DashboardPage() {
         ...prev,
         [monitorId]: [newEntry, ...(prev[monitorId] || [])],
       }));
+      loadMonitorSummary();
     } catch {
       setError("Could not ping monitor. Is the Worker running?");
     } finally {
@@ -142,6 +183,7 @@ export default function DashboardPage() {
       if (!monitors.some((item) => item.id === saved.id)) {
         setMonitors((prev) => [saved, ...prev]);
       }
+      loadMonitorSummary();
 
       try {
         const { monitor: updated, history: newEntry } = await triggerPingSingle(user, saved.id);
@@ -185,6 +227,7 @@ export default function DashboardPage() {
         return copy;
       });
       setSelectedMonitorIds((prev) => prev.filter((item) => item !== id));
+      loadMonitorSummary();
     } catch {
       setError("Could not delete monitor. Please try again.");
     }
@@ -198,10 +241,13 @@ export default function DashboardPage() {
     );
   }, [monitors, query]);
 
-  const monitorStatsMap = useMemo(() => buildMonitorStatsMap(history), [history]);
+  const monitorStatsMap = useMemo(() => buildMonitorStatsMap(monitors.reduce((acc, monitor) => {
+    acc[monitor.id] = monitor;
+    return acc;
+  }, {})), [monitors]);
   const kpis = useMemo(
-    () => buildKpis(monitors, monitorStatsMap, { loading }),
-    [loading, monitors, monitorStatsMap]
+    () => buildKpis(monitors, monitorStatsMap, { loading: summaryLoading && !monitorSummary, summary: monitorSummary }),
+    [summaryLoading, monitorSummary, monitors, monitorStatsMap]
   );
   const comparisonData = useMemo(
     () => buildComparisonSeries(history, selectedMonitorIds, range),
@@ -212,7 +258,7 @@ export default function DashboardPage() {
     [comparisonData, selectedMonitorIds]
   );
   const attentionItems = useMemo(() => buildAttentionItems(monitors, monitorStatsMap), [monitors, monitorStatsMap]);
-  const recentSignals = useMemo(() => buildRecentSignals(history, monitors, range), [history, monitors, range]);
+  const recentSignals = useMemo(() => buildRecentSignals(monitors, range), [monitors, range]);
   const barData = useMemo(() => buildSlowMonitorBars(monitors, monitorStatsMap), [monitors, monitorStatsMap]);
 
   const selectedMonitorMap = useMemo(() => {

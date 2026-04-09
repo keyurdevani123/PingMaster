@@ -1,0 +1,33 @@
+PINGMASTER START GUIDE
+
+1. Extract the zip and open terminal in the PingMaster folder.
+
+2. If wrangler is not installed
+npm install -g wrangler
+
+3. Start frontend
+cd frontend
+npm install
+npm run dev
+
+Frontend runs on:
+http://localhost:5173
+
+4. Start worker in another terminal
+cd worker
+npm install
+
+Run worker:
+npm run dev
+
+Worker runs on:
+http://127.0.0.1:8787
+
+5. Optional checks
+Frontend build:
+cd frontend
+npm run build
+
+6. Worker auth test:
+cd worker
+npm run test:auth

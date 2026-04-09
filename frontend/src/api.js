@@ -6,11 +6,12 @@ import { normalizeMonitorPsiCapability } from "./utils/psiCapability";
 
 const WORKER_URL = import.meta.env.VITE_WORKER_URL || "http://127.0.0.1:8787";
 const PSI_CACHE_TTL_MS = 5 * 60 * 1000;
-const API_CACHE_TTL_MS = 5 * 60 * 1000;
-const PUBLIC_STATUS_CACHE_TTL_MS = 60 * 1000;
-const MAINTENANCE_CACHE_TTL_MS = 60 * 1000;
-const MONITOR_WORKSPACE_CACHE_TTL_MS = 5 * 60 * 1000;
+const API_CACHE_TTL_MS = 10 * 60 * 1000;
+const PUBLIC_STATUS_CACHE_TTL_MS = 2 * 60 * 1000;
+const MAINTENANCE_CACHE_TTL_MS = 2 * 60 * 1000;
+const MONITOR_WORKSPACE_CACHE_TTL_MS = 10 * 60 * 1000;
 const ENDPOINT_SUGGESTIONS_CACHE_TTL_MS = 10 * 60 * 1000;
+const DASHBOARD_SUMMARY_CACHE_TTL_MS = 2 * 60 * 1000;
 const psiCache = new Map();
 const apiCache = new Map();
 let currentWorkspaceId = "";
@@ -112,6 +113,18 @@ export async function fetchMonitors(user, options = {}) {
 
   writeApiCache(cacheKey, uniqueItems);
   return uniqueItems;
+}
+
+export async function fetchMonitorSummary(user) {
+  const cacheKey = `monitor-summary:${user.uid}:${getWorkspaceCacheScope()}`;
+  const cached = readApiCache(cacheKey, DASHBOARD_SUMMARY_CACHE_TTL_MS);
+  if (cached) return cached;
+
+  const res = await fetch(`${WORKER_URL}/monitors/summary`, { headers: await authHeaders(user) });
+  if (!res.ok) throw new Error("Failed to fetch monitor summary");
+  const payload = await res.json();
+  writeApiCache(cacheKey, payload);
+  return payload;
 }
 
 // ── GET /monitors (paginated) ─────────────────
@@ -399,6 +412,49 @@ export async function fetchMonitorWorkspace(user, monitorId, options = {}) {
   return payload;
 }
 
+export async function fetchMonitorAiReport(user, monitorId) {
+  const cacheKey = `monitor-ai-report:${user.uid}:${getWorkspaceCacheScope()}:${monitorId}`;
+  const cached = readApiCache(cacheKey, API_CACHE_TTL_MS);
+  if (cached) return cached;
+
+  const res = await fetch(`${WORKER_URL}/monitors/${monitorId}/ai-report`, {
+    headers: await authHeaders(user),
+  });
+  if (!res.ok) {
+    let message = "Failed to fetch AI report";
+    try {
+      const body = await res.json();
+      if (body?.error) message = body.error;
+    } catch {
+      // Keep fallback.
+    }
+    throw new Error(message);
+  }
+
+  const payload = await res.json();
+  writeApiCache(cacheKey, payload);
+  return payload;
+}
+
+export async function generateMonitorAiReport(user, monitorId, payload = {}) {
+  const res = await fetch(`${WORKER_URL}/monitors/${monitorId}/ai-report`, {
+    method: "POST",
+    headers: await authHeaders(user),
+    body: JSON.stringify(payload),
+  });
+  const result = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(result?.error || "Failed to generate AI report");
+  }
+  invalidateMonitorAiReportCache(user.uid, monitorId);
+  writeApiCache(`monitor-ai-report:${user.uid}:${getWorkspaceCacheScope()}:${monitorId}`, {
+    monitorId,
+    workspaceId: getWorkspaceCacheScope(),
+    report: result,
+  });
+  return result;
+}
+
 export function primeMonitorWorkspace(user, monitorId, payload, options = {}) {
   if (!user || !monitorId || !payload?.monitor) return;
   const historyLimit = Number.isFinite(options.historyLimit)
@@ -462,6 +518,72 @@ export async function fetchIncident(user, incidentId) {
   return payload;
 }
 
+export async function fetchIncidentActionPack(user, incidentId) {
+  const cacheKey = `incident-action-pack:${user.uid}:${getWorkspaceCacheScope()}:${incidentId}`;
+  const cached = readApiCache(cacheKey, API_CACHE_TTL_MS);
+  if (cached) return cached;
+
+  const res = await fetch(`${WORKER_URL}/incidents/${incidentId}/action-pack`, {
+    headers: await authHeaders(user),
+  });
+  if (!res.ok) {
+    let message = "Failed to fetch incident action pack";
+    try {
+      const body = await res.json();
+      if (body?.error) message = body.error;
+    } catch {
+      // Keep fallback.
+    }
+    throw new Error(message);
+  }
+  const payload = await res.json();
+  writeApiCache(cacheKey, payload);
+  return payload;
+}
+
+export async function generateIncidentActionPack(user, incidentId) {
+  const res = await fetch(`${WORKER_URL}/incidents/${incidentId}/action-pack`, {
+    method: "POST",
+    headers: await authHeaders(user),
+  });
+  const payload = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(payload?.error || "Failed to generate incident action pack");
+  }
+  invalidateIncidentActionPackCache(user.uid, incidentId);
+  writeApiCache(`incident-action-pack:${user.uid}:${getWorkspaceCacheScope()}:${incidentId}`, {
+    incidentId,
+    workspaceId: getWorkspaceCacheScope(),
+    actionPack: payload,
+  });
+  return payload;
+}
+
+export async function generateIncidentCreationSuggestions(user, monitorId) {
+  const res = await fetch(`${WORKER_URL}/incidents/suggestions/create`, {
+    method: "POST",
+    headers: await authHeaders(user),
+    body: JSON.stringify({ monitorId }),
+  });
+  const payload = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(payload?.error || "Failed to generate incident creation suggestions");
+  }
+  return payload;
+}
+
+export async function generateIncidentResolveSuggestions(user, incidentId) {
+  const res = await fetch(`${WORKER_URL}/incidents/${incidentId}/suggestions/resolve`, {
+    method: "POST",
+    headers: await authHeaders(user),
+  });
+  const payload = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(payload?.error || "Failed to generate incident resolve suggestions");
+  }
+  return payload;
+}
+
 export async function createIncident(user, payload) {
   const res = await fetch(`${WORKER_URL}/incidents`, {
     method: "POST",
@@ -505,6 +627,7 @@ export async function updateIncident(user, incidentId, payload) {
 
   const result = await res.json();
   invalidateUserApiCache(user.uid);
+  invalidateIncidentActionPackCache(user.uid, incidentId);
   return result;
 }
 
@@ -532,6 +655,7 @@ export async function addIncidentUpdate(user, incidentId, payload) {
 
   const result = await res.json();
   invalidateUserApiCache(user.uid);
+  invalidateIncidentActionPackCache(user.uid, incidentId);
   return result;
 }
 
@@ -878,6 +1002,19 @@ export async function runPageSpeedAudit(url, strategy = "mobile") {
   return payload;
 }
 
+export async function saveMonitorPsiSummary(user, monitorId, psiPayload, strategy = "desktop") {
+  const res = await fetch(`${WORKER_URL}/monitors/${monitorId}/psi-summary`, {
+    method: "POST",
+    headers: await authHeaders(user),
+    body: JSON.stringify({ psiPayload, strategy }),
+  });
+  const payload = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(payload?.error || "Failed to save PSI summary");
+  }
+  return payload;
+}
+
 function formatPageSpeedErrorMessage(message, url) {
   const text = String(message || "").trim();
   const lower = text.toLowerCase();
@@ -986,11 +1123,41 @@ function invalidateAlertApiCache(userId) {
   }
 }
 
+function invalidateMonitorAiReportCache(userId, monitorId) {
+  const allKeys = new Set([...apiCache.keys(), ...getPersistedApiCacheKeys()]);
+  for (const key of allKeys) {
+    if (!key.startsWith("monitor-ai-report:")) continue;
+    if (!key.includes(`:${userId}:`)) continue;
+    if (monitorId && !key.endsWith(`:${monitorId}`)) continue;
+    apiCache.delete(key);
+    try {
+      localStorage.removeItem(`api-cache:${key}`);
+    } catch {
+      // Ignore storage remove errors.
+    }
+  }
+}
+
 function invalidateTeamApiCache(userId) {
   const allKeys = new Set([...apiCache.keys(), ...getPersistedApiCacheKeys()]);
   for (const key of allKeys) {
     if (!key.includes(`:${userId}`)) continue;
     if (!key.startsWith("team:")) continue;
+    apiCache.delete(key);
+    try {
+      localStorage.removeItem(`api-cache:${key}`);
+    } catch {
+      // Ignore storage remove errors.
+    }
+  }
+}
+
+function invalidateIncidentActionPackCache(userId, incidentId) {
+  const allKeys = new Set([...apiCache.keys(), ...getPersistedApiCacheKeys()]);
+  for (const key of allKeys) {
+    if (!key.startsWith("incident-action-pack:")) continue;
+    if (!key.includes(`:${userId}:`)) continue;
+    if (incidentId && !key.endsWith(`:${incidentId}`)) continue;
     apiCache.delete(key);
     try {
       localStorage.removeItem(`api-cache:${key}`);

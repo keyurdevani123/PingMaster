@@ -8,9 +8,12 @@ import {
   getChildMonitors,
   getHistory,
   getMonitors,
+  getMonitorSummary,
   pingSingle,
   updateMonitorEndpoints,
 } from "./handlers/monitors.js";
+import { getAiReport, postAiReport } from "./handlers/aiReports.js";
+import { postPsiSummary } from "./handlers/psiSummary.js";
 import {
   addIncidentUpdate,
   createIncident,
@@ -18,6 +21,8 @@ import {
   getIncidents,
   updateIncident,
 } from "./handlers/incidents.js";
+import { getIncidentActionPackHandler, postIncidentActionPackHandler } from "./handlers/incidentActionPack.js";
+import { postIncidentCreationSuggestionsHandler, postIncidentResolveSuggestionsHandler } from "./handlers/incidentSuggestions.js";
 import {
   createAlertChannel,
   getAlertChannels,
@@ -134,12 +139,20 @@ export default {
       return getMonitors(request, redis, userId, workspaceId, corsHeaders);
     }
 
+    if (path === "/monitors/summary" && method === "GET") {
+      return getMonitorSummary(request, redis, userId, workspaceId, corsHeaders);
+    }
+
     if (path === "/incidents" && method === "GET") {
       return getIncidents(request, redis, auth, workspace, membership, corsHeaders);
     }
 
     if (path === "/incidents" && method === "POST") {
       return createIncident(request, redis, auth, workspace, membership, env, corsHeaders, ctx);
+    }
+
+    if (path === "/incidents/suggestions/create" && method === "POST") {
+      return postIncidentCreationSuggestionsHandler(request, redis, auth, workspace, membership, corsHeaders, env);
     }
 
     if (path === "/alerts/channels" && method === "GET") {
@@ -210,6 +223,18 @@ export default {
       return addIncidentUpdate(request, redis, auth, workspace, membership, path.split("/")[2], corsHeaders);
     }
 
+    if (path.startsWith("/incidents/") && path.endsWith("/action-pack") && method === "GET") {
+      return getIncidentActionPackHandler(request, redis, auth, workspace, membership, path.split("/")[2], corsHeaders);
+    }
+
+    if (path.startsWith("/incidents/") && path.endsWith("/action-pack") && method === "POST") {
+      return postIncidentActionPackHandler(request, redis, auth, workspace, membership, path.split("/")[2], env, corsHeaders);
+    }
+
+    if (path.startsWith("/incidents/") && path.endsWith("/suggestions/resolve") && method === "POST") {
+      return postIncidentResolveSuggestionsHandler(request, redis, auth, workspace, membership, path.split("/")[2], corsHeaders, env);
+    }
+
     if (path.startsWith("/incidents/") && method === "GET") {
       return getIncident(request, redis, auth, workspace, membership, path.split("/")[2], corsHeaders);
     }
@@ -232,6 +257,18 @@ export default {
 
     if (path.startsWith("/monitors/") && path.endsWith("/children") && method === "POST") {
       return addChildMonitors(request, redis, userId, workspaceId, path.split("/")[2], corsHeaders);
+    }
+
+    if (path.startsWith("/monitors/") && path.endsWith("/ai-report") && method === "GET") {
+      return getAiReport(request, redis, auth, workspace, membership, path.split("/")[2], corsHeaders);
+    }
+
+    if (path.startsWith("/monitors/") && path.endsWith("/ai-report") && method === "POST") {
+      return postAiReport(request, redis, auth, workspace, membership, path.split("/")[2], env, corsHeaders);
+    }
+
+    if (path.startsWith("/monitors/") && path.endsWith("/psi-summary") && method === "POST") {
+      return postPsiSummary(request, redis, auth, workspace, membership, path.split("/")[2], corsHeaders);
     }
 
     if (path.startsWith("/monitors/") && path.endsWith("/endpoints") && method === "PATCH") {

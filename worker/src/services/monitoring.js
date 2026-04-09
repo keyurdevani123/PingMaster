@@ -4,6 +4,9 @@ import { createAlertRuntimeCache, processMonitorAlert } from "./alerts.js";
 import { buildMaintenanceResult, getActiveMaintenanceForMonitor } from "./maintenance.js";
 import { invalidateWorkspaceStatusPageCaches } from "./statusPages.js";
 
+const SUMMARY_HISTORY_LIMIT = 288;
+const SUMMARY_WINDOW_MS = 24 * 60 * 60 * 1000;
+
 export async function validateMonitorCandidate(url) {
   try {
     const response = await fetch(url, {
@@ -45,7 +48,6 @@ export async function pingMonitor(redis, monitor, env = {}, options = {}) {
     monitor.lastContentType = result.contentType;
   }
   Object.assign(monitor, attachPsiCapability(monitor, result.contentType));
-  await redis.set(`monitor:${monitor.id}`, monitor);
 
   const historyEntry = {
     timestamp: result.timestamp,
@@ -56,7 +58,31 @@ export async function pingMonitor(redis, monitor, env = {}, options = {}) {
   };
   await redis.lpush(`history:${monitor.id}`, historyEntry);
   await redis.ltrim(`history:${monitor.id}`, 0, 2015);
+  const existingSummary = await loadMonitorRollingSummary(redis, monitor.id);
+  const nextWindow = [
+    compactSummaryEntry(historyEntry),
+    ...((existingSummary?.window || []).filter(Boolean)),
+  ].slice(0, SUMMARY_HISTORY_LIMIT);
+  const nextSummary = buildMonitorMetricsSummaryFromWindow(nextWindow);
+  await saveMonitorRollingSummary(redis, monitor.id, {
+    window: nextWindow,
+    ...nextSummary,
+  });
+  monitor.metrics24h = nextSummary;
+  if (previousStatus && previousStatus !== result.status) {
+    monitor.lastTransition = {
+      from: previousStatus,
+      to: result.status,
+      timestamp: result.timestamp,
+      statusCode: result.statusCode ?? null,
+      errorType: result.errorType || "",
+    };
+  }
+  await redis.set(`monitor:${monitor.id}`, monitor);
   await invalidateWorkspaceStatusPageCaches(redis, monitor.workspaceId || null);
+  if (monitor.workspaceId) {
+    await redis.del(`workspace_monitor_summary:${monitor.workspaceId}`);
+  }
 
   if (activeMaintenance) {
     return { monitor, result, historyEntry };
@@ -77,6 +103,127 @@ export async function pingMonitor(redis, monitor, env = {}, options = {}) {
   }
 
   return { monitor, result, historyEntry };
+}
+
+export function buildMonitorMetricsSummary(historyEntries) {
+  const now = Date.now();
+  const entries = Array.isArray(historyEntries)
+    ? historyEntries.filter((entry) => {
+      const ts = new Date(entry?.timestamp).getTime();
+      return !Number.isFinite(ts) || now - ts <= SUMMARY_WINDOW_MS;
+    })
+    : [];
+  const operationalEntries = entries.filter((entry) => entry?.status !== "MAINTENANCE");
+  const totalChecks = operationalEntries.length;
+  const upChecks = operationalEntries.filter((entry) => entry?.status === "UP" || entry?.status === "UP_RESTRICTED").length;
+  const latencyValues = operationalEntries
+    .map((entry) => entry?.latency)
+    .filter((value) => Number.isFinite(value));
+
+  return {
+    windowSize: totalChecks,
+    uptime24h: totalChecks > 0 ? Math.round((upChecks / totalChecks) * 100) : null,
+    avgLatency24h: latencyValues.length > 0
+      ? Math.round(latencyValues.reduce((sum, value) => sum + value, 0) / latencyValues.length)
+      : null,
+    degradedChecks24h: operationalEntries.filter((entry) => entry?.status === "UP_RESTRICTED").length,
+    downChecks24h: operationalEntries.filter((entry) => entry?.status === "DOWN").length,
+  };
+}
+
+function buildMonitorMetricsSummaryFromWindow(windowEntries) {
+  const entries = Array.isArray(windowEntries)
+    ? windowEntries.map((entry) => ({
+      status: entry?.s,
+      latency: entry?.l,
+      timestamp: entry?.t || null,
+    }))
+    : [];
+  return buildMonitorMetricsSummary(entries);
+}
+
+function compactSummaryEntry(historyEntry) {
+  return {
+    s: historyEntry?.status || "",
+    l: Number.isFinite(historyEntry?.latency) ? historyEntry.latency : null,
+    t: historyEntry?.timestamp || new Date().toISOString(),
+  };
+}
+
+async function loadMonitorRollingSummary(redis, monitorId) {
+  const key = getMonitorSummaryKey(monitorId);
+  const summary = await redis.get(key);
+  if (summary?.window) {
+    const requiresReseed = summary.window.some((entry) => !entry?.t && !entry?.timestamp);
+    if (requiresReseed) {
+      const seededHistory = await redis.lrange(`history:${monitorId}`, 0, SUMMARY_HISTORY_LIMIT - 1);
+      const seededWindow = Array.isArray(seededHistory)
+        ? seededHistory
+          .filter(Boolean)
+          .map((entry) => compactSummaryEntry(entry))
+          .filter((entry) => {
+            const ts = new Date(entry.t).getTime();
+            return !Number.isFinite(ts) || Date.now() - ts <= SUMMARY_WINDOW_MS;
+          })
+          .slice(0, SUMMARY_HISTORY_LIMIT)
+        : [];
+      const seededSummary = {
+        window: seededWindow,
+        ...buildMonitorMetricsSummaryFromWindow(seededWindow),
+      };
+      await saveMonitorRollingSummary(redis, monitorId, seededSummary);
+      return seededSummary;
+    }
+
+    const normalizedWindow = Array.isArray(summary.window)
+      ? summary.window
+        .filter(Boolean)
+        .map((entry) => ({
+          s: entry?.s || entry?.status || "",
+          l: Number.isFinite(entry?.l) ? entry.l : (Number.isFinite(entry?.latency) ? entry.latency : null),
+          t: entry?.t || entry?.timestamp || null,
+        }))
+        .filter((entry) => {
+          const ts = new Date(entry.t).getTime();
+          return !Number.isFinite(ts) || Date.now() - ts <= SUMMARY_WINDOW_MS;
+        })
+        .slice(0, SUMMARY_HISTORY_LIMIT)
+      : [];
+    const normalizedSummary = {
+      window: normalizedWindow,
+      ...buildMonitorMetricsSummaryFromWindow(normalizedWindow),
+    };
+    if (JSON.stringify(normalizedSummary) !== JSON.stringify(summary)) {
+      await saveMonitorRollingSummary(redis, monitorId, normalizedSummary);
+    }
+    return normalizedSummary;
+  }
+
+  const seededHistory = await redis.lrange(`history:${monitorId}`, 0, SUMMARY_HISTORY_LIMIT - 1);
+  const seededWindow = Array.isArray(seededHistory)
+    ? seededHistory
+      .filter(Boolean)
+      .map((entry) => compactSummaryEntry(entry))
+      .filter((entry) => {
+        const ts = new Date(entry.t).getTime();
+        return !Number.isFinite(ts) || Date.now() - ts <= SUMMARY_WINDOW_MS;
+      })
+      .slice(0, SUMMARY_HISTORY_LIMIT)
+    : [];
+  const seededSummary = {
+    window: seededWindow,
+    ...buildMonitorMetricsSummaryFromWindow(seededWindow),
+  };
+  await saveMonitorRollingSummary(redis, monitorId, seededSummary);
+  return seededSummary;
+}
+
+async function saveMonitorRollingSummary(redis, monitorId, summary) {
+  await redis.set(getMonitorSummaryKey(monitorId), summary);
+}
+
+function getMonitorSummaryKey(monitorId) {
+  return `monitor_summary:${monitorId}`;
 }
 
 export async function runPinger(redis, env) {

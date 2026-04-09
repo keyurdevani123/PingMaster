@@ -5,6 +5,18 @@ export function getInitial(email) {
 }
 
 export function buildKpis(monitors, monitorStatsMap, options = {}) {
+  if (options.summary) {
+    const summary = options.summary;
+    return [
+      { label: "Total Monitors", value: summary.totalMonitors ?? "--", caption: "Configured services", valueColor: "text-[#eff3fa]" },
+      { label: "Available Now", value: summary.availableNow ?? "--", caption: "Healthy right now", valueColor: "text-[#36cf9b]" },
+      { label: "Down Now", value: summary.downNow ?? "--", caption: "Needs attention", valueColor: Number(summary.downNow) > 0 ? "text-[#f19a89]" : "text-[#a2abb9]" },
+      { label: "Degraded", value: summary.degradedNow ?? "--", caption: Number(summary.degradedNow) > 0 ? "Partial responses" : "No partial responses", valueColor: "text-[#f2c55f]" },
+      { label: "24h Uptime", value: Number.isFinite(summary.uptime24h) ? `${summary.uptime24h}%` : "--", caption: "Across last 24 hours", valueColor: "text-[#9fb0c7]" },
+      { label: "Avg Response", value: Number.isFinite(summary.avgResponse24h) ? `${summary.avgResponse24h} ms` : "--", caption: "Last 24 hours", valueColor: "text-[#7aa2ff]" },
+    ];
+  }
+
   if (options.loading) {
     return [
       { label: "Total Monitors", value: "--", caption: "Configured services", valueColor: "text-[#eff3fa]" },
@@ -168,25 +180,13 @@ export function formatLatencyTick(value) {
 }
 
 export function buildMonitorStatsMap(historyByMonitor) {
-  const cutoff24h = Date.now() - 24 * 60 * 60 * 1000;
   const map = {};
 
-  Object.entries(historyByMonitor || {}).forEach(([monitorId, entries]) => {
-    const recent = (entries || []).filter((entry) => {
-      const ts = new Date(entry.timestamp).getTime();
-      return Number.isFinite(ts) && ts >= cutoff24h;
-    });
-
-    const latencyValues = recent
-      .map((entry) => entry.latency)
-      .filter((value) => Number.isFinite(value));
-    const availableCount = recent.filter((entry) => entry.status !== "DOWN").length;
-
+  Object.entries(historyByMonitor || {}).forEach(([monitorId, monitor]) => {
+    if (!monitor) return;
     map[monitorId] = {
-      uptime24h: recent.length > 0 ? Math.round((availableCount / recent.length) * 100) : null,
-      avgLatency24h: latencyValues.length > 0
-        ? Math.round(latencyValues.reduce((sum, value) => sum + value, 0) / latencyValues.length)
-        : null,
+      uptime24h: Number.isFinite(monitor?.metrics24h?.uptime24h) ? monitor.metrics24h.uptime24h : null,
+      avgLatency24h: Number.isFinite(monitor?.metrics24h?.avgLatency24h) ? monitor.metrics24h.avgLatency24h : null,
     };
   });
 
@@ -223,34 +223,26 @@ export function buildSlowMonitorBars(monitors, monitorStatsMap) {
     .slice(0, 5);
 }
 
-export function buildRecentSignals(historyByMonitor, monitors, range) {
+export function buildRecentSignals(monitors, range) {
   const cutoff = range === "7d"
     ? Date.now() - 7 * 24 * 60 * 60 * 1000
     : Date.now() - 24 * 60 * 60 * 1000;
 
   return monitors
     .map((monitor) => {
-      const entries = [...(historyByMonitor[monitor.id] || [])].reverse();
-      for (let i = 1; i < entries.length; i += 1) {
-        const previous = entries[i - 1];
-        const current = entries[i];
-        const ts = new Date(current?.timestamp).getTime();
-        if (!Number.isFinite(ts) || ts < cutoff) continue;
-
-        if (current.status !== previous.status) {
-          const status = getStatusMeta(current.status);
-          return {
-            monitorId: monitor.id,
-            monitorName: monitor.name,
-            timestamp: current.timestamp,
-            timestampLabel: formatTooltipTime(ts, range),
-            title: `${current.status || "UNKNOWN"} from ${previous.status || "UNKNOWN"}`,
-            label: status.label,
-            badgeClass: status.badgeClass,
-          };
-        }
-      }
-      return null;
+      const transition = monitor?.lastTransition;
+      const ts = new Date(transition?.timestamp).getTime();
+      if (!transition || !Number.isFinite(ts) || ts < cutoff) return null;
+      const status = getStatusMeta(transition.to);
+      return {
+        monitorId: monitor.id,
+        monitorName: monitor.name,
+        timestamp: transition.timestamp,
+        timestampLabel: formatTooltipTime(ts, range),
+        title: `${transition.to || "UNKNOWN"} from ${transition.from || "UNKNOWN"}`,
+        label: status.label,
+        badgeClass: status.badgeClass,
+      };
     })
     .filter(Boolean)
     .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())

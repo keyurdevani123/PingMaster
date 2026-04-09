@@ -73,7 +73,26 @@ export async function createWorkspaceInvite(redis, workspace, invitedByUserId, e
   const existingInvites = await listWorkspaceInvites(redis, workspace.id);
   const pendingInvite = existingInvites.find((invite) => invite.email === normalizedEmail && invite.status === "pending");
   if (pendingInvite) {
-    return { ok: false, error: "An active invite already exists for this email." };
+    const pendingExpiresAt = new Date(pendingInvite.expiresAt).getTime();
+    if (Number.isFinite(pendingExpiresAt) && pendingExpiresAt < Date.now()) {
+      const expiredInvite = {
+        ...pendingInvite,
+        status: "expired",
+        updatedAt: new Date().toISOString(),
+      };
+      await redis.set(`workspace_invite:${pendingInvite.id}`, expiredInvite);
+    } else {
+      const refreshedInvite = {
+        ...pendingInvite,
+        invitedByUserId,
+        updatedAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + INVITE_TTL_MS).toISOString(),
+      };
+      await redis.set(`workspace_invite:${pendingInvite.id}`, refreshedInvite);
+      await redis.lrem(getWorkspaceInvitesKey(workspace.id), 0, refreshedInvite.id);
+      await redis.lpush(getWorkspaceInvitesKey(workspace.id), refreshedInvite.id);
+      return { ok: true, invite: refreshedInvite, resent: true };
+    }
   }
 
   const invite = buildInviteRecord(workspace, normalizedEmail, invitedByUserId);

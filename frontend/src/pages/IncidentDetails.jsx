@@ -16,6 +16,7 @@ import { useAuth } from "../context/AuthContext";
 import {
   addIncidentUpdate,
   fetchIncident,
+  generateIncidentResolveSuggestions,
   updateIncident,
   updateIncidentStatus,
 } from "../api";
@@ -456,6 +457,7 @@ export default function IncidentDetails() {
 
       {showResolveModal && (
         <ResolveIncidentModal
+          user={user}
           incident={normalizedIncident}
           form={resolutionForm}
           submitting={submitting}
@@ -550,10 +552,64 @@ function IncidentFormModal({ title, description, form, submitting, submitLabel, 
   );
 }
 
-function ResolveIncidentModal({ incident, form, submitting, onChange, onClose, onSubmit }) {
+function ResolveIncidentModal({ user, incident, form, submitting, onChange, onClose, onSubmit }) {
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState("");
+  const [aiSuggestion, setAiSuggestion] = useState(null);
+
+  async function handleSuggest() {
+    if (!user || !incident?.id) return;
+    setAiLoading(true);
+    setAiError("");
+    try {
+      const payload = await generateIncidentResolveSuggestions(user, incident.id);
+      const suggestions = payload?.suggestions || null;
+      setAiSuggestion(payload || null);
+      if (suggestions) {
+        onChange((prev) => ({
+          ...prev,
+          fixSummary: suggestions.fixSummary && suggestions.fixSummary !== "--" ? suggestions.fixSummary : prev.fixSummary,
+          resolutionNotes: suggestions.resolutionNotes && suggestions.resolutionNotes !== "--" ? suggestions.resolutionNotes : prev.resolutionNotes,
+        }));
+      }
+    } catch (err) {
+      setAiError(err?.message || "Could not generate resolve suggestions.");
+    } finally {
+      setAiLoading(false);
+    }
+  }
+
   return (
-    <ModalShell title={`Resolve ${incident.incidentCode}`} description="Add the final fix summary before closing the incident." onClose={onClose}>
+    <ModalShell title={`Resolve ${incident.incidentCode}`} description="Add the final fix summary before closing the incident." onClose={onClose} sizeClassName="max-w-2xl">
       <form onSubmit={onSubmit} className="space-y-4">
+        <SuggestionPanel
+          eyebrow="Resolve Suggestion"
+          title="Timeline-aware resolve draft"
+          description="Use Gemini to draft the closure fields from the recent response timeline and the latest monitor status."
+        >
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              onClick={handleSuggest}
+              disabled={aiLoading}
+              className="h-9 px-4 rounded-lg border border-[#2a2f39] bg-[#161b22] text-sm text-[#d4dae4] disabled:opacity-50"
+            >
+              {aiLoading ? "Suggesting..." : aiSuggestion ? "Suggest Again" : "Suggest With AI"}
+            </button>
+            {aiSuggestion?.generatedAt ? (
+              <p className="text-xs text-[#7f8793]">Generated {formatTimestamp(aiSuggestion.generatedAt)}</p>
+            ) : null}
+          </div>
+          {aiError ? <p className="text-sm text-[#f0a496]">{aiError}</p> : null}
+          {aiSuggestion?.suggestions ? (
+            <>
+              <SuggestionRow label="Suggested fix summary" value={aiSuggestion.suggestions.fixSummary} />
+              <SuggestionRow label="Suggested resolution notes" value={aiSuggestion.suggestions.resolutionNotes} />
+            </>
+          ) : (
+            <p className="text-sm text-[#8d94a0]">Run Suggest With AI to autofill the closure fields from your incident timeline and latest monitor state.</p>
+          )}
+        </SuggestionPanel>
         <FormField label="How Was It Fixed?">
           <textarea
             value={form.fixSummary}
@@ -588,6 +644,7 @@ function UpdateResponseModal({ form, submitting, onChange, onClose, onSubmit }) 
       title="Add Response"
       description="Record one troubleshooting step, status update, or fix so the incident history stays clean."
       onClose={onClose}
+      sizeClassName="max-w-2xl"
     >
       <form onSubmit={onSubmit} className="space-y-4">
         <FormField label="Response Title">
@@ -619,10 +676,11 @@ function UpdateResponseModal({ form, submitting, onChange, onClose, onSubmit }) 
   );
 }
 
-function ModalShell({ title, description, children, onClose }) {
+function ModalShell({ title, description, children, onClose, sizeClassName = "max-w-3xl" }) {
   return (
     <div className="fixed inset-0 z-50 bg-[#050608]/80 backdrop-blur-sm px-4 py-6 overflow-y-auto">
-      <div className="mx-auto w-full max-w-3xl rounded-2xl border border-[#232833] bg-[#0f1217] shadow-[0_24px_90px_rgba(0,0,0,0.45)]">
+      <div className="min-h-full flex items-center justify-center">
+        <div className={`w-full ${sizeClassName} rounded-2xl border border-[#232833] bg-[#0f1217] shadow-[0_24px_90px_rgba(0,0,0,0.45)]`}>
         <div className="flex items-start justify-between gap-4 px-5 md:px-6 py-5 border-b border-[#232833]">
           <div>
             <h3 className="text-xl font-semibold text-[#edf2fb]">{title}</h3>
@@ -633,6 +691,42 @@ function ModalShell({ title, description, children, onClose }) {
           </button>
         </div>
         <div className="px-5 md:px-6 py-5">{children}</div>
+      </div>
+      </div>
+    </div>
+  );
+}
+
+function SuggestionPanel({ eyebrow, title, description, children }) {
+  return (
+    <section className="rounded-xl border border-[#252a33] bg-[#11161d] p-4 space-y-3">
+      <div>
+        <p className="text-[11px] uppercase tracking-[0.08em] text-[#8d94a0]">{eyebrow}</p>
+        <h4 className="text-sm font-medium text-[#edf2fb] mt-1">{title}</h4>
+        <p className="text-xs leading-5 text-[#8d94a0] mt-1">{description}</p>
+      </div>
+      <div className="space-y-3">{children}</div>
+    </section>
+  );
+}
+
+function SuggestionRow({ label, value, actionLabel, onAction }) {
+  return (
+    <div className="rounded-lg border border-[#252a33] bg-[#0d1118] px-3 py-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-[11px] uppercase tracking-[0.08em] text-[#8d94a0]">{label}</p>
+          <p className="text-sm leading-6 text-[#dbe2ee] mt-1 whitespace-pre-wrap">{value || "--"}</p>
+        </div>
+        {onAction && actionLabel ? (
+          <button
+            type="button"
+            onClick={onAction}
+            className="h-8 shrink-0 px-3 rounded-lg border border-[#2a2f39] bg-[#161b22] text-xs text-[#d4dae4]"
+          >
+            {actionLabel}
+          </button>
+        ) : null}
       </div>
     </div>
   );

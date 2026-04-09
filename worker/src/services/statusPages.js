@@ -6,7 +6,7 @@ import {
 } from "./workspaces.js";
 import { buildWorkspaceMaintenanceSummary } from "./maintenance.js";
 
-const PUBLIC_STATUS_CACHE_TTL_MS = 60 * 1000;
+const PUBLIC_STATUS_CACHE_TTL_MS = 2 * 60 * 1000;
 
 function slugify(input) {
   return String(input || "")
@@ -106,12 +106,6 @@ export async function loadStatusPageBySlug(redis, slug) {
   return redis.get(`status_page:${statusPageId}`);
 }
 
-function calculateUptime(history) {
-  if (!Array.isArray(history) || history.length === 0) return null;
-  const healthy = history.filter((entry) => entry?.status === "UP").length;
-  return Number(((healthy / history.length) * 100).toFixed(1));
-}
-
 export async function buildPublicStatusPayload(redis, statusPage) {
   const selectedIds = Array.isArray(statusPage.selectedMonitorIds) ? statusPage.selectedMonitorIds : [];
   const monitors = [];
@@ -119,7 +113,7 @@ export async function buildPublicStatusPayload(redis, statusPage) {
   for (const monitorId of selectedIds) {
     const monitor = await redis.get(`monitor:${monitorId}`);
     if (!monitor) continue;
-    const history = await redis.lrange(`history:${monitorId}`, 0, 143);
+    const metrics = monitor.metrics24h || null;
     monitors.push({
       id: monitor.id,
       name: monitor.name,
@@ -128,7 +122,7 @@ export async function buildPublicStatusPayload(redis, statusPage) {
       lastChecked: monitor.lastChecked || null,
       lastLatency: monitor.lastLatency ?? null,
       lastStatusCode: monitor.lastStatusCode ?? null,
-      uptime24h: calculateUptime(history),
+      uptime24h: Number.isFinite(metrics?.uptime24h) ? metrics.uptime24h : null,
     });
   }
 

@@ -28,10 +28,14 @@ import {
   ReferenceArea,
 } from "recharts";
 import MonitorPsiTab from "../../components/MonitorPsiTab";
+import MonitorAiReportTab from "../../components/MonitorAiReportTab";
 import { useAuth } from "../../context/AuthContext";
 import {
   fetchMonitorWorkspace,
   fetchEndpointSuggestions,
+  fetchMonitorAiReport,
+  generateMonitorAiReport,
+  saveMonitorPsiSummary,
   primeEndpointSuggestions,
   primeMonitorWorkspace,
   triggerPingSingle,
@@ -88,6 +92,10 @@ export default function MonitorDetailsPage() {
   const [psiData, setPsiData] = useState(null);
   const [psiLoading, setPsiLoading] = useState(false);
   const [psiError, setPsiError] = useState("");
+  const [aiReport, setAiReport] = useState(null);
+  const [aiReportLoading, setAiReportLoading] = useState(false);
+  const [aiReportError, setAiReportError] = useState("");
+  const [aiReportLoaded, setAiReportLoaded] = useState(false);
 
   const [networkMetrics, setNetworkMetrics] = useState({
     dnsResolutionMs: null,
@@ -113,7 +121,7 @@ export default function MonitorDetailsPage() {
   const fallbackParentId = location.state?.parentId;
 
   useEffect(() => {
-    if (isChildMonitor && tab !== "overview") {
+    if (isChildMonitor && (tab === "insights" || tab === "endpoints" || tab === "ai-report")) {
       setTab("overview");
     }
   }, [isChildMonitor, tab]);
@@ -121,6 +129,9 @@ export default function MonitorDetailsPage() {
   useEffect(() => {
     setMaintenanceLoaded(false);
     setMaintenanceItems([]);
+    setAiReport(null);
+    setAiReportLoaded(false);
+    setAiReportError("");
   }, [monitorId]);
 
   const loadDetails = useCallback(async ({ silent = false } = {}) => {
@@ -252,10 +263,49 @@ export default function MonitorDetailsPage() {
       const payload = await runPageSpeedAudit(monitor.url, psiStrategy);
       setPsiData(payload);
       localStorage.setItem(getPsiStorageKey(monitor.id, psiStrategy), JSON.stringify(payload));
+      try {
+        await saveMonitorPsiSummary(user, monitor.id, payload, psiStrategy);
+      } catch {
+        // Keep PSI usable even if summary persistence fails.
+      }
     } catch (err) {
       setPsiError(err?.message || "Could not fetch PageSpeed data.");
     } finally {
       setPsiLoading(false);
+    }
+  }
+
+  const loadAiReport = useCallback(async () => {
+    if (!user || !monitor?.id) return;
+    setAiReportLoading(true);
+    setAiReportError("");
+    try {
+      const payload = await fetchMonitorAiReport(user, monitor.id);
+      setAiReport(payload?.report || null);
+      setAiReportLoaded(true);
+    } catch (err) {
+      setAiReportError(err?.message || "Could not load AI report.");
+      setAiReportLoaded(true);
+    } finally {
+      setAiReportLoading(false);
+    }
+  }, [monitor?.id, user]);
+
+  async function handleGenerateAiReport() {
+    if (!user || !monitor?.id) return;
+    setAiReportLoading(true);
+    setAiReportError("");
+    try {
+      const payload = await generateMonitorAiReport(user, monitor.id, {
+        psiPayload: psiData || null,
+        psiStrategy,
+      });
+      setAiReport(payload);
+      setAiReportLoaded(true);
+    } catch (err) {
+      setAiReportError(err?.message || "Could not generate AI report.");
+    } finally {
+      setAiReportLoading(false);
     }
   }
 
@@ -505,6 +555,14 @@ export default function MonitorDetailsPage() {
     return () => clearTimeout(timerId);
   }, [isChildMonitor, loadMonitorMaintenances, maintenanceLoaded, maintenanceLoading, monitor?.id, tab]);
 
+  useEffect(() => {
+    if (tab !== "ai-report" || aiReportLoaded || aiReportLoading || !monitor?.id) return undefined;
+    const timerId = setTimeout(() => {
+      loadAiReport();
+    }, 300);
+    return () => clearTimeout(timerId);
+  }, [aiReportLoaded, aiReportLoading, loadAiReport, monitor?.id, tab]);
+
   if (loading) {
     return (
       <div className="min-h-screen bg-[#08090b] text-[#f2f2f2] grid place-items-center">
@@ -634,6 +692,7 @@ export default function MonitorDetailsPage() {
           <div className="border-b border-[#232832] flex items-center gap-2">
             <TabButton active={tab === "overview"} onClick={() => setTab("overview")}>Overview</TabButton>
             {!isChildMonitor && <TabButton active={tab === "insights"} onClick={() => setTab("insights")}>PSI</TabButton>}
+            {!isChildMonitor && <TabButton active={tab === "ai-report"} onClick={() => setTab("ai-report")}>AI Report</TabButton>}
             {!isChildMonitor && <TabButton active={tab === "endpoints"} onClick={() => setTab("endpoints")}>Endpoints Monitor</TabButton>}
           </div>
 
@@ -878,6 +937,14 @@ export default function MonitorDetailsPage() {
               psiError={psiError}
               onStrategyChange={setPsiStrategy}
               onRunAudit={handleRunPsi}
+            />
+          ) : tab === "ai-report" ? (
+            <MonitorAiReportTab
+              monitor={monitor}
+              reportPayload={aiReport}
+              loading={aiReportLoading}
+              error={aiReportError}
+              onGenerate={handleGenerateAiReport}
             />
           ) : (
             <section className="space-y-5">

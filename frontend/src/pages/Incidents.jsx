@@ -19,6 +19,8 @@ import {
   createIncident,
   fetchIncidents,
   fetchMonitors,
+  generateIncidentCreationSuggestions,
+  generateIncidentResolveSuggestions,
   updateIncident,
   updateIncidentStatus,
 } from "../api";
@@ -532,6 +534,7 @@ export default function Incidents() {
         <IncidentFormModal
           title="Create Incident"
           description="Capture the monitor, impact, probable cause, and next operator steps in one clean record."
+          user={user}
           form={incidentForm}
           monitors={monitors}
           disableMonitor={false}
@@ -547,6 +550,7 @@ export default function Incidents() {
         <IncidentFormModal
           title={`Edit ${editingIncident.incidentCode}`}
           description="Keep the record current while the issue is open or acknowledged."
+          user={user}
           form={incidentForm}
           monitors={monitors}
           disableMonitor
@@ -560,6 +564,7 @@ export default function Incidents() {
 
       {resolvingIncident && (
         <ResolveIncidentModal
+          user={user}
           incident={resolvingIncident}
           form={resolutionForm}
           submitting={submitting}
@@ -710,6 +715,7 @@ function IncidentCard({
 function IncidentFormModal({
   title,
   description,
+  user,
   form,
   monitors,
   disableMonitor = false,
@@ -719,14 +725,53 @@ function IncidentFormModal({
   onClose,
   onSubmit,
 }) {
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState("");
+  const [aiSuggestion, setAiSuggestion] = useState(null);
+  const selectedMonitor = monitors.find((monitor) => monitor.id === form.monitorId) || null;
+
+  useEffect(() => {
+    setAiSuggestion(null);
+    setAiError("");
+  }, [form.monitorId]);
+
+  async function handleSuggest() {
+    if (!user || !form.monitorId) return;
+    setAiLoading(true);
+    setAiError("");
+    try {
+      const payload = await generateIncidentCreationSuggestions(user, form.monitorId);
+      const suggestions = payload?.suggestions || null;
+      setAiSuggestion(payload || null);
+      if (suggestions) {
+        onChange((prev) => ({
+          ...prev,
+          severity: suggestions.severity || "high",
+          title: suggestions.title && suggestions.title !== "--" ? suggestions.title : "",
+          impactSummary: suggestions.impactSummary && suggestions.impactSummary !== "--" ? suggestions.impactSummary : "",
+          description: suggestions.description && suggestions.description !== "--" ? suggestions.description : "",
+          rootCause: suggestions.rootCause && suggestions.rootCause !== "--" ? suggestions.rootCause : "",
+          nextSteps: suggestions.nextSteps && suggestions.nextSteps !== "--" ? suggestions.nextSteps : "",
+        }));
+      }
+    } catch (err) {
+      setAiError(err?.message || "Could not generate incident suggestions.");
+    } finally {
+      setAiLoading(false);
+    }
+  }
+
   return (
-    <ModalShell title={title} description={description} onClose={onClose}>
+    <ModalShell title={title} description={description} onClose={onClose} sizeClassName="max-w-2xl">
       <form onSubmit={onSubmit} className="space-y-4">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <FormField label="Monitor">
             <select
               value={form.monitorId}
-              onChange={(event) => onChange((prev) => ({ ...prev, monitorId: event.target.value }))}
+              onChange={(event) => onChange(() => ({
+                ...INCIDENT_FORM_DEFAULTS,
+                monitorId: event.target.value,
+              }))}
               className="w-full h-11 bg-[#14181e] border border-[#252a33] text-sm text-[#dbe1eb] rounded-lg px-3 focus:outline-none"
               disabled={disableMonitor}
               required
@@ -754,6 +799,41 @@ function IncidentFormModal({
             </select>
           </FormField>
         </div>
+
+        {selectedMonitor ? (
+          <SuggestionPanel
+            eyebrow="Creation Suggestions"
+            title="Monitor-aware incident starter"
+            description={`Use Gemini to draft the incident from ${selectedMonitor.name}${selectedMonitor.status ? `, currently ${formatMonitorStatusLabel(selectedMonitor.status).toLowerCase()}` : ""}.`}
+          >
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                onClick={handleSuggest}
+                disabled={aiLoading}
+                className="h-9 px-4 rounded-lg border border-[#2a2f39] bg-[#161b22] text-sm text-[#d4dae4] disabled:opacity-50"
+              >
+                {aiLoading ? "Suggesting..." : aiSuggestion ? "Suggest Again" : "Suggest With AI"}
+              </button>
+              {aiSuggestion?.generatedAt ? (
+                <p className="text-xs text-[#7f8793]">Generated {formatTimestamp(aiSuggestion.generatedAt)}</p>
+              ) : null}
+            </div>
+            {aiError ? <p className="text-sm text-[#f0a496]">{aiError}</p> : null}
+            {aiSuggestion?.suggestions ? (
+              <>
+                <SuggestionRow label="Suggested severity" value={toSeverityLabel(aiSuggestion.suggestions.severity)} />
+                <SuggestionRow label="Suggested title" value={aiSuggestion.suggestions.title} />
+                <SuggestionRow label="Suggested impact" value={aiSuggestion.suggestions.impactSummary} />
+                <SuggestionRow label="Suggested details" value={aiSuggestion.suggestions.description} />
+                <SuggestionRow label="Suggested probable cause" value={aiSuggestion.suggestions.rootCause} />
+                <SuggestionRow label="Suggested next steps" value={aiSuggestion.suggestions.nextSteps} />
+              </>
+            ) : (
+              <p className="text-sm text-[#8d94a0]">Choose a monitor, then run Suggest With AI to autofill the incident fields from the latest status and recent history.</p>
+            )}
+          </SuggestionPanel>
+        ) : null}
 
         <FormField label="Incident Title">
           <input
@@ -829,18 +909,74 @@ function IncidentFormModal({
   );
 }
 
-function ResolveIncidentModal({ incident, form, submitting, onChange, onClose, onSubmit }) {
+function ResolveIncidentModal({ user, incident, form, submitting, onChange, onClose, onSubmit }) {
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState("");
+  const [aiSuggestion, setAiSuggestion] = useState(null);
+
+  async function handleSuggest() {
+    if (!user || !incident?.id) return;
+    setAiLoading(true);
+    setAiError("");
+    try {
+      const payload = await generateIncidentResolveSuggestions(user, incident.id);
+      const suggestions = payload?.suggestions || null;
+      setAiSuggestion(payload || null);
+      if (suggestions) {
+        onChange((prev) => ({
+          ...prev,
+          fixSummary: suggestions.fixSummary && suggestions.fixSummary !== "--" ? suggestions.fixSummary : prev.fixSummary,
+          resolutionNotes: suggestions.resolutionNotes && suggestions.resolutionNotes !== "--" ? suggestions.resolutionNotes : prev.resolutionNotes,
+        }));
+      }
+    } catch (err) {
+      setAiError(err?.message || "Could not generate resolve suggestions.");
+    } finally {
+      setAiLoading(false);
+    }
+  }
+
   return (
     <ModalShell
       title={`Resolve ${incident.incidentCode}`}
       description="Before resolving, leave a short fix summary so the team knows exactly what changed."
       onClose={onClose}
+      sizeClassName="max-w-2xl"
     >
       <form onSubmit={onSubmit} className="space-y-4">
         <div className="rounded-xl border border-[#232833] bg-[#10141b] p-4">
           <p className="text-sm text-[#edf2fb] font-medium">{incident.title}</p>
           <p className="text-sm text-[#8d94a0] mt-1">{incident.monitorName}</p>
         </div>
+
+        <SuggestionPanel
+          eyebrow="Resolve Suggestion"
+          title="Timeline-aware resolve draft"
+          description="Use Gemini to draft the closure fields from the recent response timeline and the latest monitor status."
+        >
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              onClick={handleSuggest}
+              disabled={aiLoading}
+              className="h-9 px-4 rounded-lg border border-[#2a2f39] bg-[#161b22] text-sm text-[#d4dae4] disabled:opacity-50"
+            >
+              {aiLoading ? "Suggesting..." : aiSuggestion ? "Suggest Again" : "Suggest With AI"}
+            </button>
+            {aiSuggestion?.generatedAt ? (
+              <p className="text-xs text-[#7f8793]">Generated {formatTimestamp(aiSuggestion.generatedAt)}</p>
+            ) : null}
+          </div>
+          {aiError ? <p className="text-sm text-[#f0a496]">{aiError}</p> : null}
+          {aiSuggestion?.suggestions ? (
+            <>
+              <SuggestionRow label="Suggested fix summary" value={aiSuggestion.suggestions.fixSummary} />
+              <SuggestionRow label="Suggested resolution notes" value={aiSuggestion.suggestions.resolutionNotes} />
+            </>
+          ) : (
+            <p className="text-sm text-[#8d94a0]">Run Suggest With AI to autofill the closure fields from your incident timeline and latest monitor state.</p>
+          )}
+        </SuggestionPanel>
 
         <FormField label="How Was It Fixed?">
           <textarea
@@ -887,7 +1023,8 @@ function ResolveIncidentModal({ incident, form, submitting, onChange, onClose, o
 function ModalShell({ title, description, children, onClose, sizeClassName = "max-w-3xl" }) {
   return (
     <div className="fixed inset-0 z-50 bg-[#050608]/80 backdrop-blur-sm px-4 py-6 overflow-y-auto">
-      <div className={`mx-auto w-full ${sizeClassName} rounded-2xl border border-[#232833] bg-[#0f1217] shadow-[0_24px_90px_rgba(0,0,0,0.45)]`}>
+      <div className="min-h-full flex items-center justify-center">
+        <div className={`w-full ${sizeClassName} rounded-2xl border border-[#232833] bg-[#0f1217] shadow-[0_24px_90px_rgba(0,0,0,0.45)]`}>
         <div className="flex items-start justify-between gap-4 px-5 md:px-6 py-5 border-b border-[#232833]">
           <div>
             <h3 className="text-xl font-semibold text-[#edf2fb]">{title}</h3>
@@ -903,8 +1040,57 @@ function ModalShell({ title, description, children, onClose, sizeClassName = "ma
         </div>
         <div className="px-5 md:px-6 py-5">{children}</div>
       </div>
+      </div>
     </div>
   );
+}
+
+function SuggestionPanel({ eyebrow, title, description, children }) {
+  return (
+    <section className="rounded-xl border border-[#252a33] bg-[#11161d] p-4 space-y-3">
+      <div>
+        <p className="text-[11px] uppercase tracking-[0.08em] text-[#8d94a0]">{eyebrow}</p>
+        <h4 className="text-sm font-medium text-[#edf2fb] mt-1">{title}</h4>
+        <p className="text-xs leading-5 text-[#8d94a0] mt-1">{description}</p>
+      </div>
+      <div className="space-y-3">{children}</div>
+    </section>
+  );
+}
+
+function SuggestionRow({ label, value, actionLabel, onAction }) {
+  return (
+    <div className="rounded-lg border border-[#252a33] bg-[#0d1118] px-3 py-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-[11px] uppercase tracking-[0.08em] text-[#8d94a0]">{label}</p>
+          <p className="text-sm leading-6 text-[#dbe2ee] mt-1 whitespace-pre-wrap">{value || "--"}</p>
+        </div>
+        {onAction && actionLabel ? (
+          <button
+            type="button"
+            onClick={onAction}
+            className="h-8 shrink-0 px-3 rounded-lg border border-[#2a2f39] bg-[#161b22] text-xs text-[#d4dae4]"
+          >
+            {actionLabel}
+          </button>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function formatMonitorStatusLabel(status) {
+  if (status === "UP_RESTRICTED") return "Up Restricted";
+  if (status === "DOWN") return "Down";
+  if (status === "MAINTENANCE") return "Maintenance";
+  return "Up";
+}
+
+function toSeverityLabel(severity) {
+  const value = String(severity || "").trim().toLowerCase();
+  if (!value) return "--";
+  return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
 function FormField({ label, children }) {
