@@ -8,6 +8,7 @@ import {
   createTeamInvite,
   createTeamWorkspace,
   deleteTeamWorkspace,
+  fetchBilling,
   fetchMonitors,
   fetchTeamInvites,
   fetchTeamMembers,
@@ -51,10 +52,12 @@ export default function WorkspacesPage() {
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [pendingRemoveMemberId, setPendingRemoveMemberId] = useState(null);
   const [roleChanging, setRoleChanging] = useState({});
+  const [workspaceBilling, setWorkspaceBilling] = useState(billing || null);
 
   const isOwner = currentMembershipRole === "owner";
   const isTeamWorkspace = workspace?.type === "team";
-  const hasTeamWorkspaceAccess = Boolean(billing?.entitlements?.canCreateTeamWorkspaces);
+  const effectiveBilling = workspaceBilling || billing || null;
+  const hasTeamWorkspaceAccess = Boolean(effectiveBilling?.entitlements?.canCreateTeamWorkspaces);
   const canCreateTeamWorkspace = isOwner && !isTeamWorkspace && hasTeamWorkspaceAccess;
   const canInvite = isOwner && isTeamWorkspace;
   const canDelete = isOwner && isTeamWorkspace && (workspace?.memberCount ?? 2) <= 1;
@@ -102,6 +105,31 @@ export default function WorkspacesPage() {
   useEffect(() => {
     loadTeamData();
   }, [loadTeamData]);
+
+  useEffect(() => {
+    setWorkspaceBilling(billing || null);
+  }, [billing]);
+
+  useEffect(() => {
+    let active = true;
+
+    async function loadWorkspaceBilling() {
+      if (!user || !workspace?.id) return;
+      try {
+        const payload = await fetchBilling(user, { force: true });
+        if (!active) return;
+        setWorkspaceBilling(payload?.billing || null);
+      } catch {
+        if (!active) return;
+        setWorkspaceBilling(billing || null);
+      }
+    }
+
+    loadWorkspaceBilling();
+    return () => {
+      active = false;
+    };
+  }, [billing, user, workspace?.id]);
 
   async function handleAcceptInvite() {
     if (!inviteId) return;

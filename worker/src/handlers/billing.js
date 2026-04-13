@@ -27,6 +27,10 @@ function getWorkspaceIdFromWebhook(payload) {
     || "";
 }
 
+function getRazorpayOrderWorkspaceKey(orderId) {
+  return `razorpay_order_workspace:${orderId}`;
+}
+
 export async function getBillingHandler(request, redis, auth, workspace, membership, env, corsHeaders) {
   if (!workspace?.id || !membership) {
     return json({ error: "Forbidden" }, 403, corsHeaders);
@@ -72,6 +76,13 @@ export async function postBillingSubscribe(request, redis, auth, workspace, memb
       subscriptionId: null,
       customerId: auth?.email || null,
     });
+    if (order?.id) {
+      await redis.set(getRazorpayOrderWorkspaceKey(order.id), {
+        workspaceId: workspace.id,
+        workspaceName: workspace.name || "Workspace",
+        createdAt: new Date().toISOString(),
+      });
+    }
     return json({
       billing: buildBillingSummary(savedBilling, {
         checkoutReady: true,
@@ -174,7 +185,14 @@ export async function postRazorpayWebhook(request, redis, env, corsHeaders) {
     return json({ received: true, deduped: true }, 200, corsHeaders);
   }
 
-  const workspaceId = getWorkspaceIdFromWebhook(payload);
+  let workspaceId = getWorkspaceIdFromWebhook(payload);
+  if (!workspaceId) {
+    const orderId = payload?.payload?.payment?.entity?.order_id || "";
+    if (orderId) {
+      const mapped = await redis.get(getRazorpayOrderWorkspaceKey(orderId));
+      workspaceId = mapped?.workspaceId || "";
+    }
+  }
   if (!workspaceId) {
     await redis.set(dedupeKey, { processedAt: new Date().toISOString(), skipped: true });
     return json({ received: true, skipped: true }, 200, corsHeaders);
