@@ -68,16 +68,51 @@ import { crawlSite, pingDiagnostics, pingNow } from "./handlers/system.js";
 import { runPinger } from "./services/monitoring.js";
 import { buildBootstrapPayload, resolveWorkspaceForUser } from "./services/workspaces.js";
 
+function readEnvValue(env, key) {
+  const value = env?.[key];
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function getRedisConfig(env) {
+  const url = readEnvValue(env, "UPSTASH_REDIS_REST_URL");
+  const token = readEnvValue(env, "UPSTASH_REDIS_REST_TOKEN");
+  const missing = [];
+  if (!url) missing.push("UPSTASH_REDIS_REST_URL");
+  if (!token) missing.push("UPSTASH_REDIS_REST_TOKEN");
+  if (missing.length > 0) {
+    throw new Error(`Missing Redis configuration: ${missing.join(", ")}`);
+  }
+  return { url, token };
+}
+
 function createRedis(env) {
+  const { url, token } = getRedisConfig(env);
   return new Redis({
-    url: env.UPSTASH_REDIS_REST_URL,
-    token: env.UPSTASH_REDIS_REST_TOKEN,
+    url,
+    token,
   });
+}
+
+function buildHealthPayload(env) {
+  return {
+    ok: true,
+    service: "pingmaster-worker",
+    config: {
+      redisConfigured: Boolean(readEnvValue(env, "UPSTASH_REDIS_REST_URL") && readEnvValue(env, "UPSTASH_REDIS_REST_TOKEN")),
+      frontendConfigured: Boolean(readEnvValue(env, "FRONTEND_APP_URL")),
+      resendConfigured: Boolean(readEnvValue(env, "RESEND_API_KEY") && readEnvValue(env, "RESEND_FROM_ADDRESS")),
+      billingConfigured: Boolean(
+        readEnvValue(env, "RAZORPAY_KEY_ID")
+        && readEnvValue(env, "RAZORPAY_KEY_SECRET")
+        && readEnvValue(env, "RAZORPAY_WEBHOOK_SECRET")
+        && readEnvValue(env, "RAZORPAY_PLAN_ID_PRO")
+      ),
+    },
+  };
 }
 
 export default {
   async fetch(request, env, ctx) {
-    const redis = createRedis(env);
     const url = new URL(request.url);
     const path = url.pathname;
     const method = request.method;
@@ -86,6 +121,21 @@ export default {
     if (method === "OPTIONS") {
       return new Response(null, { headers: corsHeaders });
     }
+
+    if (path === "/" && method === "GET") {
+      return json({
+        ok: true,
+        service: "pingmaster-worker",
+        message: "PingMaster API is running.",
+        health: "/health",
+      }, 200, corsHeaders);
+    }
+
+    if (path === "/health" && method === "GET") {
+      return json(buildHealthPayload(env), 200, corsHeaders);
+    }
+
+    const redis = createRedis(env);
 
     if (path.startsWith("/status/") && method === "GET") {
       return getPublicStatusPage(request, redis, path.split("/")[2], corsHeaders);
@@ -332,7 +382,13 @@ export default {
   },
 
   async scheduled(_event, env) {
-    const redis = createRedis(env);
+    let redis;
+    try {
+      redis = createRedis(env);
+    } catch (error) {
+      console.warn(error?.message || "Scheduled monitoring skipped because Redis is not configured.");
+      return;
+    }
     await runPinger(redis, env);
   },
 };
