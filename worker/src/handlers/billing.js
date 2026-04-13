@@ -1,14 +1,16 @@
 import { json } from "../lib/http.js";
 import {
+  applyRazorpayPaymentToWorkspace,
   applyRazorpaySubscriptionToWorkspace,
   buildBillingSummary,
-  createRazorpaySubscription,
+  createRazorpayOrder,
+  fetchRazorpayPayment,
   fetchRazorpaySubscription,
   getRazorpayMode,
   getWorkspaceBilling,
   isRazorpayConfigured,
   mergeWorkspaceBilling,
-  verifyRazorpayCheckoutSignature,
+  verifyRazorpayOrderSignature,
   verifyRazorpayWebhookSignature,
 } from "../services/billing.js";
 
@@ -55,14 +57,20 @@ export async function postBillingSubscribe(request, redis, auth, workspace, memb
   }
 
   const existingBilling = await getWorkspaceBilling(redis, workspace);
-  if (existingBilling.subscriptionId && ["authenticated", "active", "pending"].includes(existingBilling.status)) {
-    return json({ error: "This workspace already has an active billing subscription." }, 409, corsHeaders);
+  if (existingBilling.plan === "pro" && ["authenticated", "active", "pending"].includes(existingBilling.status)) {
+    return json({ error: "This workspace already has active Pro access." }, 409, corsHeaders);
   }
 
   try {
-    const subscription = await createRazorpaySubscription(env, workspace, auth, body);
-    const savedBilling = await applyRazorpaySubscriptionToWorkspace(redis, workspace.id, subscription, {
-      status: subscription?.status || "created",
+    const order = await createRazorpayOrder(env, workspace, auth, body);
+    const savedBilling = await mergeWorkspaceBilling(redis, workspace.id, {
+      provider: "razorpay",
+      plan: "pro",
+      status: "created",
+      orderId: order?.id || null,
+      paymentId: null,
+      subscriptionId: null,
+      customerId: auth?.email || null,
     });
     return json({
       billing: buildBillingSummary(savedBilling, {
@@ -71,9 +79,11 @@ export async function postBillingSubscribe(request, redis, auth, workspace, memb
       }),
       checkout: {
         key: env.RAZORPAY_KEY_ID,
-        subscriptionId: subscription.id,
+        amount: order.amount,
+        currency: order.currency || "INR",
+        orderId: order.id,
         name: "PingMaster",
-        description: "PingMaster Pro subscription",
+        description: "PingMaster Pro workspace upgrade",
         prefill: {
           name: auth?.name || "",
           email: auth?.email || "",
@@ -104,14 +114,14 @@ export async function postBillingVerify(request, redis, auth, workspace, members
     return json({ error: "Invalid JSON body" }, 400, corsHeaders);
   }
 
+  const orderId = typeof body?.orderId === "string" ? body.orderId.trim() : "";
   const paymentId = typeof body?.paymentId === "string" ? body.paymentId.trim() : "";
-  const subscriptionId = typeof body?.subscriptionId === "string" ? body.subscriptionId.trim() : "";
   const signature = typeof body?.signature === "string" ? body.signature.trim() : "";
 
-  const valid = await verifyRazorpayCheckoutSignature(
+  const valid = await verifyRazorpayOrderSignature(
     env.RAZORPAY_KEY_SECRET,
+    orderId,
     paymentId,
-    subscriptionId,
     signature,
   );
   if (!valid) {
@@ -119,10 +129,12 @@ export async function postBillingVerify(request, redis, auth, workspace, members
   }
 
   try {
-    const subscription = await fetchRazorpaySubscription(env, subscriptionId);
-    const savedBilling = await applyRazorpaySubscriptionToWorkspace(redis, workspace.id, subscription, {
+    const payment = await fetchRazorpayPayment(env, paymentId);
+    const savedBilling = await applyRazorpayPaymentToWorkspace(redis, workspace.id, payment, {
+      orderId,
       paymentId,
       eventType: "checkout.verified",
+      status: payment?.status === "captured" ? "active" : payment?.status || "created",
     });
     return json({
       success: true,
@@ -184,6 +196,14 @@ export async function postRazorpayWebhook(request, redis, env, corsHeaders) {
         paymentId: payment?.id || null,
         eventId: dedupeKey,
         eventType,
+      });
+    } else if (payment?.id) {
+      await applyRazorpayPaymentToWorkspace(redis, workspaceId, payment, {
+        orderId: payment?.order_id || null,
+        paymentId: payment?.id || null,
+        eventId: dedupeKey,
+        eventType,
+        status: payment?.status === "captured" ? "active" : payment?.status || "pending",
       });
     } else {
       await mergeWorkspaceBilling(redis, workspaceId, {

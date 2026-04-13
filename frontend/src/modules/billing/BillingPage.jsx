@@ -7,6 +7,8 @@ import { useAuth } from "../../context/AuthContext";
 const RAZORPAY_CHECKOUT_URL = "https://checkout.razorpay.com/v1/checkout.js";
 
 let razorpayLoader = null;
+const BILLING_SYNC_ATTEMPTS = 6;
+const BILLING_SYNC_DELAY_MS = 1500;
 
 function loadRazorpayCheckout() {
   if (typeof window === "undefined") return Promise.resolve(false);
@@ -62,6 +64,21 @@ export default function BillingPage() {
     loadBillingState();
   }, [loadBillingState, workspace?.id]);
 
+  async function waitForPaidBillingState() {
+    for (let attempt = 0; attempt < BILLING_SYNC_ATTEMPTS; attempt += 1) {
+      const payload = await fetchBilling(user, { force: true });
+      const nextBilling = payload?.billing || null;
+      setBillingState(nextBilling);
+      if (nextBilling?.isPaid && nextBilling?.plan === "pro") {
+        return nextBilling;
+      }
+      if (attempt < BILLING_SYNC_ATTEMPTS - 1) {
+        await new Promise((resolve) => window.setTimeout(resolve, BILLING_SYNC_DELAY_MS));
+      }
+    }
+    return null;
+  }
+
   async function openCheckout(checkout) {
     const loaded = await loadRazorpayCheckout();
     if (!loaded || !window.Razorpay) {
@@ -83,7 +100,9 @@ export default function BillingPage() {
 
       const razorpay = new window.Razorpay({
         key: checkout.key,
-        subscription_id: checkout.subscriptionId,
+        order_id: checkout.orderId,
+        amount: checkout.amount,
+        currency: checkout.currency || "INR",
         name: checkout.name,
         description: checkout.description,
         prefill: checkout.prefill,
@@ -92,8 +111,8 @@ export default function BillingPage() {
         handler: async (response) => {
           try {
             await verifyBillingSubscription(user, {
+              orderId: response?.razorpay_order_id || "",
               paymentId: response?.razorpay_payment_id || "",
-              subscriptionId: response?.razorpay_subscription_id || "",
               signature: response?.razorpay_signature || "",
             });
             finishResolve(response);
@@ -102,7 +121,7 @@ export default function BillingPage() {
           }
         },
         modal: {
-          ondismiss: () => finishReject(new Error("Checkout was closed before verification completed.")),
+          ondismiss: () => finishResolve({ dismissed: true }),
         },
       });
 
@@ -116,7 +135,14 @@ export default function BillingPage() {
     setSuccess("");
     try {
       const payload = await createBillingSubscription(user, { plan: "pro" });
-      await openCheckout(payload?.checkout);
+      const checkoutResult = await openCheckout(payload?.checkout);
+      const paidBilling = await waitForPaidBillingState();
+      if (!paidBilling?.isPaid || paidBilling?.plan !== "pro") {
+        if (checkoutResult?.dismissed) {
+          throw new Error("Checkout closed before PingMaster could confirm the payment. If Razorpay shows success, refresh once and try again.");
+        }
+        throw new Error("Payment was received, but Pro access has not synced yet. Refresh in a moment and it should appear.");
+      }
       await refreshSession();
       await loadBillingState({ silent: true });
       setSuccess("Test payment verified. Pro access is now active for this workspace.");
@@ -202,14 +228,14 @@ export default function BillingPage() {
               <h2 className="text-xl font-semibold text-white">Start test checkout</h2>
               <p className="mt-2 text-sm text-[#8d94a0]">
                 {billing?.mode === "test"
-                  ? "This workspace is ready for Razorpay test payments. Use test cards or UPI in checkout, then verify the payment before any feature unlock happens."
+                  ? "This workspace is ready for Razorpay test payments. Use test cards or UPI in checkout, then PingMaster verifies the payment before any feature unlock happens."
                   : "The billing backend is wired, but this workspace is not currently using a test key."}
               </p>
             </div>
 
             <div className="rounded-xl border border-[#252a33] bg-[#14181e] p-4 space-y-3">
               <InfoLine icon={ShieldCheck} text="Payment unlocks only after backend signature verification." />
-              <InfoLine icon={CheckCircle2} text="Use a public tunnel for the webhook when testing from localhost." />
+              <InfoLine icon={CheckCircle2} text="Webhook updates keep billing in sync after the initial checkout verification." />
               <InfoLine icon={ArrowRight} text="After a successful test payment, team workspace creation becomes available." />
             </div>
 
@@ -224,7 +250,7 @@ export default function BillingPage() {
 
             {!billing?.checkoutReady && (
               <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
-                Razorpay keys or the Pro plan ID are not configured yet.
+                Razorpay keys are not configured yet.
               </div>
             )}
           </section>

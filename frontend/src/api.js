@@ -55,10 +55,10 @@ async function authHeaders(user, workspaceId = currentWorkspaceId) {
   return headers;
 }
 
-export async function fetchSessionBootstrap(user, workspaceId = currentWorkspaceId) {
+export async function fetchSessionBootstrap(user, workspaceId = currentWorkspaceId, options = {}) {
   const scope = workspaceId || "default";
   const cacheKey = `session:bootstrap:${user.uid}:${scope}`;
-  const cached = readApiCache(cacheKey, API_CACHE_TTL_MS);
+  const cached = options.force ? null : readApiCache(cacheKey, API_CACHE_TTL_MS);
   if (cached) return cached;
 
   const res = await fetch(`${WORKER_URL}/session/bootstrap`, {
@@ -366,9 +366,9 @@ export async function fetchTeamInvites(user) {
   return payload;
 }
 
-export async function fetchBilling(user) {
+export async function fetchBilling(user, options = {}) {
   const cacheKey = `billing:${user.uid}:${getWorkspaceCacheScope()}`;
-  const cached = readApiCache(cacheKey, API_CACHE_TTL_MS);
+  const cached = options.force ? null : readApiCache(cacheKey, API_CACHE_TTL_MS);
   if (cached) return cached;
 
   const res = await fetch(`${WORKER_URL}/billing`, { headers: await authHeaders(user) });

@@ -1,6 +1,7 @@
 const FREE_PLAN = "free";
 const PRO_PLAN = "pro";
-const ACTIVE_BILLING_STATUSES = new Set(["authenticated", "active", "pending"]);
+const ACTIVE_BILLING_STATUSES = new Set(["authenticated", "active", "captured"]);
+const DEFAULT_PRO_AMOUNT_PAISA = 49900;
 
 const PLAN_CONFIG = {
   [FREE_PLAN]: {
@@ -82,6 +83,7 @@ function normalizeBillingRecord(workspaceId, value = {}) {
     plan: normalizePlanCode(value?.plan),
     status: normalizeStatus(value?.status),
     customerId: value?.customerId || null,
+    orderId: value?.orderId || null,
     subscriptionId: value?.subscriptionId || null,
     paymentId: value?.paymentId || null,
     razorpayPlanId: value?.razorpayPlanId || null,
@@ -125,6 +127,7 @@ export function buildBillingSummary(billing, options = {}) {
     description: plan.description,
     status,
     isPaid,
+    orderId: billing?.orderId || null,
     subscriptionId: billing?.subscriptionId || null,
     customerId: billing?.customerId || null,
     paymentId: billing?.paymentId || null,
@@ -166,7 +169,6 @@ export function isRazorpayConfigured(env) {
   return Boolean(
     env?.RAZORPAY_KEY_ID
     && env?.RAZORPAY_KEY_SECRET
-    && env?.RAZORPAY_PLAN_ID_PRO
   );
 }
 
@@ -241,11 +243,50 @@ export async function createRazorpaySubscription(env, workspace, auth, options =
   });
 }
 
+function getProAmountPaise(env) {
+  const raw = typeof env?.RAZORPAY_PRO_AMOUNT_PAISA === "string" ? env.RAZORPAY_PRO_AMOUNT_PAISA.trim() : "";
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_PRO_AMOUNT_PAISA;
+}
+
+export async function createRazorpayOrder(env, workspace, auth, options = {}) {
+  const planCode = normalizePlanCode(options?.plan);
+  if (planCode !== PRO_PLAN) {
+    throw new Error("Only the Pro plan is available right now.");
+  }
+
+  const amount = getProAmountPaise(env);
+  const receiptSuffix = `${Date.now()}`.slice(-10);
+
+  return requestRazorpay(env, "/v1/orders", {
+    method: "POST",
+    body: {
+      amount,
+      currency: "INR",
+      receipt: `pm_${receiptSuffix}_${String(workspace?.id || "").slice(-10)}`,
+      notes: {
+        workspace_id: workspace?.id || "",
+        workspace_name: workspace?.name || "Workspace",
+        owner_user_id: auth?.userId || "",
+        owner_email: auth?.email || "",
+        plan_code: planCode,
+      },
+    },
+  });
+}
+
 export async function fetchRazorpaySubscription(env, subscriptionId) {
   if (!subscriptionId) {
     throw new Error("Subscription ID is required.");
   }
   return requestRazorpay(env, `/v1/subscriptions/${subscriptionId}`);
+}
+
+export async function fetchRazorpayPayment(env, paymentId) {
+  if (!paymentId) {
+    throw new Error("Payment ID is required.");
+  }
+  return requestRazorpay(env, `/v1/payments/${paymentId}`);
 }
 
 async function importHmacKey(secret) {
@@ -272,6 +313,12 @@ export async function verifyRazorpayCheckoutSignature(secret, paymentId, subscri
   return generated === String(signature).trim();
 }
 
+export async function verifyRazorpayOrderSignature(secret, orderId, paymentId, signature) {
+  if (!secret || !orderId || !paymentId || !signature) return false;
+  const generated = await createHmacHex(secret, `${orderId}|${paymentId}`);
+  return generated === String(signature).trim();
+}
+
 export async function verifyRazorpayWebhookSignature(secret, rawBody, signature) {
   if (!secret || !rawBody || !signature) return false;
   const generated = await createHmacHex(secret, rawBody);
@@ -288,11 +335,33 @@ export async function applyRazorpaySubscriptionToWorkspace(redis, workspaceId, s
     plan: normalizePlanCode(subscription?.notes?.plan_code || PRO_PLAN),
     status: normalizeStatus(subscription?.status || options.status || "created"),
     customerId: subscription?.customer_id || null,
+    orderId: options.orderId || null,
     subscriptionId: subscription?.id || options.subscriptionId || null,
     paymentId: options.paymentId || null,
     razorpayPlanId: subscription?.plan_id || null,
     currentPeriodStart: toIsoString(subscription?.current_start),
     currentPeriodEnd: toIsoString(subscription?.current_end),
+    lastWebhookEventId: options.eventId || null,
+    lastWebhookEventType: options.eventType || null,
+  });
+}
+
+export async function applyRazorpayPaymentToWorkspace(redis, workspaceId, payment, options = {}) {
+  if (!workspaceId || !payment) {
+    throw new Error("Workspace billing update requires a workspace and payment.");
+  }
+
+  return mergeWorkspaceBilling(redis, workspaceId, {
+    provider: "razorpay",
+    plan: normalizePlanCode(payment?.notes?.plan_code || options.planCode || PRO_PLAN),
+    status: normalizeStatus(options.status || (payment?.status === "captured" ? "active" : payment?.status || "created")),
+    customerId: payment?.email || payment?.contact || null,
+    orderId: payment?.order_id || options.orderId || null,
+    subscriptionId: payment?.subscription_id || null,
+    paymentId: payment?.id || options.paymentId || null,
+    razorpayPlanId: payment?.notes?.plan_id || null,
+    currentPeriodStart: toIsoString(options.currentPeriodStart || Date.now()),
+    currentPeriodEnd: toIsoString(options.currentPeriodEnd || null),
     lastWebhookEventId: options.eventId || null,
     lastWebhookEventType: options.eventType || null,
   });

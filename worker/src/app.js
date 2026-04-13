@@ -104,8 +104,9 @@ function buildHealthPayload(env) {
       billingConfigured: Boolean(
         readEnvValue(env, "RAZORPAY_KEY_ID")
         && readEnvValue(env, "RAZORPAY_KEY_SECRET")
-        && readEnvValue(env, "RAZORPAY_WEBHOOK_SECRET")
-        && readEnvValue(env, "RAZORPAY_PLAN_ID_PRO")
+      ),
+      billingWebhookConfigured: Boolean(
+        readEnvValue(env, "RAZORPAY_WEBHOOK_SECRET")
       ),
     },
   };

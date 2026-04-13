@@ -34,8 +34,8 @@ export function AuthProvider({ children }) {
   const [bootstrapError, setBootstrapError] = useState("");
   const [currentMembershipRole, setCurrentMembershipRole] = useState("owner");
 
-  async function loadBootstrap(firebaseUser, requestedWorkspaceId = "") {
-    const bootstrap = await fetchSessionBootstrap(firebaseUser, requestedWorkspaceId);
+  async function loadBootstrap(firebaseUser, requestedWorkspaceId = "", options = {}) {
+    const bootstrap = await fetchSessionBootstrap(firebaseUser, requestedWorkspaceId, options);
     const fallbackWorkspace = buildFallbackWorkspace(firebaseUser);
     const defaultWorkspace = bootstrap?.defaultWorkspace || fallbackWorkspace;
     const bootstrapWorkspaces = Array.isArray(bootstrap?.workspaces) && bootstrap.workspaces.length > 0
@@ -120,7 +120,7 @@ export function AuthProvider({ children }) {
   const logout = () => signOut(auth);
   const refreshSession = async () => {
     if (!user) return;
-    await loadBootstrap(user, workspace?.id || "");
+    await loadBootstrap(user, workspace?.id || "", { force: true });
   };
   const selectWorkspace = async (workspaceId) => {
     if (!user || !workspaceId || workspaceId === workspace?.id) return;
