@@ -1,4 +1,4 @@
-import { sendViaGmail } from "../lib/smtp.js";
+import { sendViaResend } from "../lib/resend.js";
 import { TEAM_INVITE_LIST_MAX_LIMIT } from "../config/constants.js";
 import {
   ensureWorkspaceMemberRecord,
@@ -165,14 +165,14 @@ export async function leaveWorkspace(redis, workspace, userId) {
 
 export async function sendWorkspaceInviteEmail(invite, workspace, env, request = null) {
   const inviteUrl = buildInviteUrl(invite, env, request);
-  const emailUser = env.EMAIL_USER;
-  const emailPass = env.EMAIL_PASS;
-  if (!emailUser || !emailPass) {
+  const resendApiKey = env.RESEND_API_KEY;
+  const fromAddress = env.RESEND_FROM_ADDRESS;
+  if (!resendApiKey || !fromAddress) {
     return {
       sent: false,
       queued: false,
       inviteUrl,
-      providerResponse: "Invite created without email delivery because EMAIL_USER / EMAIL_PASS are not configured.",
+      providerResponse: "Invite created without email delivery because RESEND_API_KEY / RESEND_FROM_ADDRESS are not configured.",
     };
   }
 
@@ -227,9 +227,9 @@ export async function sendWorkspaceInviteEmail(invite, workspace, env, request =
   </body>
 </html>`;
 
-  await sendViaGmail({
-    user: emailUser,
-    pass: emailPass,
+  const messageId = await sendViaResend({
+    apiKey: resendApiKey,
+    fromAddress,
     to: [invite.email],
     subject,
     html,
@@ -240,14 +240,15 @@ export async function sendWorkspaceInviteEmail(invite, workspace, env, request =
     sent: true,
     queued: false,
     inviteUrl,
-    providerResponse: `Gmail -> ${invite.email}`,
+    providerResponse: `Resend -> ${invite.email} (id: ${messageId})`,
   };
 }
 
+
+
 export function buildInviteUrl(invite, env, request = null) {
   const base = resolveAppBaseUrl(env, request);
-  // console.log(base);
-  const path = `/team?invite=${encodeURIComponent(invite.id)}`;
+  const path = `/workspaces?invite=${encodeURIComponent(invite.id)}`;
   if (!base) return path;
   return `${base}${path}`;
 }

@@ -58,6 +58,12 @@ import {
   removeMember,
   revokeTeamInvite,
 } from "./handlers/team.js";
+import {
+  getBillingHandler,
+  postBillingSubscribe,
+  postBillingVerify,
+  postRazorpayWebhook,
+} from "./handlers/billing.js";
 import { crawlSite, pingDiagnostics, pingNow } from "./handlers/system.js";
 import { runPinger } from "./services/monitoring.js";
 import { buildBootstrapPayload, resolveWorkspaceForUser } from "./services/workspaces.js";
@@ -83,6 +89,10 @@ export default {
 
     if (path.startsWith("/status/") && method === "GET") {
       return getPublicStatusPage(request, redis, path.split("/")[2], corsHeaders);
+    }
+
+    if (path === "/billing/webhooks/razorpay" && method === "POST") {
+      return postRazorpayWebhook(request, redis, env, corsHeaders);
     }
 
     let auth;
@@ -112,6 +122,18 @@ export default {
 
     if (path === "/team/members" && method === "GET") {
       return getTeamMembers(request, redis, auth, workspace, membership, corsHeaders);
+    }
+
+    if (path === "/billing" && method === "GET") {
+      return getBillingHandler(request, redis, auth, workspace, membership, env, corsHeaders);
+    }
+
+    if (path === "/billing/subscribe" && method === "POST") {
+      return postBillingSubscribe(request, redis, auth, workspace, membership, env, corsHeaders);
+    }
+
+    if (path === "/billing/verify" && method === "POST") {
+      return postBillingVerify(request, redis, auth, workspace, membership, env, corsHeaders);
     }
 
     if (path === "/team/workspaces" && method === "POST") {

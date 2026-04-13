@@ -1,4 +1,4 @@
-import { sendViaGmail } from "../lib/smtp.js";
+import { sendViaResend } from "../lib/resend.js";
 import {
   ALERT_CHANNEL_LIST_MAX_LIMIT,
   ALERT_EVENT_LIST_MAX_LIMIT,
@@ -796,22 +796,20 @@ function normalizeChannelConfig(type, input, fallback = {}) {
     return { ok: true, config: { webhookUrl } };
   }
 
-  const provider = "resend";
-  const fromEmail = typeof input?.fromEmail === "string" ? input.fromEmail.trim() : (fallback?.fromEmail || "");
   const recipientEmails = Array.isArray(input?.recipientEmails)
     ? [...new Set(input.recipientEmails.map((value) => String(value).trim()).filter(Boolean))]
     : Array.isArray(fallback?.recipientEmails) ? fallback.recipientEmails : [];
 
-  if (!isValidEmail(fromEmail)) {
-    return { ok: false, error: "email fromEmail must be valid" };
+  if (recipientEmails.length === 0) {
+    return { ok: false, error: "At least one recipient email is required." };
   }
-  if (recipientEmails.length === 0 || recipientEmails.some((value) => !isValidEmail(value))) {
-    return { ok: false, error: "email recipientEmails must contain valid email addresses" };
+  if (recipientEmails.some((value) => !isValidEmail(value))) {
+    return { ok: false, error: "One or more recipient emails are not valid." };
   }
 
   return {
     ok: true,
-    config: { provider, fromEmail, recipientEmails },
+    config: { recipientEmails },
   };
 }
 
@@ -1135,23 +1133,26 @@ async function deliverChannelMessage(channel, envelope, env) {
     return `Slack ${response.status}`;
   }
 
-  // Email via Gmail SMTP
-  const emailUser = env.EMAIL_USER;
-  const emailPass = env.EMAIL_PASS;
-  if (!emailUser || !emailPass) {
-    throw new Error("EMAIL_USER / EMAIL_PASS environment variables are not configured");
+  // Email via Resend
+  const resendApiKey = env.RESEND_API_KEY;
+  const fromAddress = env.RESEND_FROM_ADDRESS;
+  if (!resendApiKey) {
+    throw new Error("RESEND_API_KEY environment variable is not configured");
+  }
+  if (!fromAddress) {
+    throw new Error("RESEND_FROM_ADDRESS environment variable is not configured");
   }
 
-  await sendViaGmail({
-    user: emailUser,
-    pass: emailPass,
+  const messageId = await sendViaResend({
+    apiKey: resendApiKey,
+    fromAddress,
     to: channel.config.recipientEmails,
     subject: envelope.subject || envelope.title,
     html: envelope.html,
     text: envelope.text,
   });
 
-  return `Gmail → ${channel.config.recipientEmails.join(", ")}`;
+  return `Resend → ${channel.config.recipientEmails.join(", ")} (id: ${messageId})`;
 }
 
 async function safeReadJson(response) {

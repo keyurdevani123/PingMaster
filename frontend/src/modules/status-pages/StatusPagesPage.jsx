@@ -1,5 +1,6 @@
-import { Globe, LayoutGrid, AlertTriangle, Siren, Users, Plus, RefreshCw, Copy, ExternalLink, ChevronDown, X } from "lucide-react";
+﻿import { Globe, LayoutGrid, AlertTriangle, Siren, Users, Plus, RefreshCw, Copy, ExternalLink, ChevronDown, X } from "lucide-react";
 import { createElement, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import PageLoader from "../../components/PageLoader";
 import { useNavigate } from "react-router-dom";
 import { createStatusPage, fetchMonitors, fetchStatusPages, updateStatusPage } from "../../api";
 import { useAuth } from "../../context/AuthContext";
@@ -175,29 +176,12 @@ export default function StatusPagesPage() {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-[#08090b] text-[#f2f2f2] grid place-items-center">
-        <p className="text-[#8d94a0]">Loading status pages...</p>
-      </div>
+      <PageLoader />
     );
   }
 
   return (
-    <div className="h-screen bg-[#08090b] text-[#f2f2f2] flex overflow-hidden">
-      <aside className="hidden md:flex w-64 h-screen sticky top-0 overflow-hidden flex-col border-r border-[#22252b] bg-[#0f1114]">
-        <div className="px-5 py-6 border-b border-[#22252b]">
-          <h1 className="text-xl font-semibold tracking-tight">PingMaster</h1>
-          <p className="text-[11px] uppercase tracking-[0.09em] text-[#8d94a0] mt-1">Workspace Controls</p>
-        </div>
-        <nav className="flex-1 px-3 py-4 space-y-1">
-          <SidebarItem Icon={LayoutGrid} label="Dashboard" onClick={() => navigate("/dashboard")} />
-          <SidebarItem Icon={AlertTriangle} label="Incidents" onClick={() => navigate("/incidents")} />
-          <SidebarItem Icon={Siren} label="Alerts" onClick={() => navigate("/alerts")} />
-          <SidebarItem Icon={Globe} label="Status Page" active />
-          <SidebarItem Icon={Users} label="Team" onClick={() => navigate("/team")} />
-        </nav>
-      </aside>
-
-      <main className="flex-1 min-w-0 overflow-y-auto">
+    <div className="min-h-screen text-[#f2f2f2]">
         <header className="sticky top-0 z-20 border-b border-[#22252b] bg-[#0d0f13] px-5 md:px-8 py-4 flex items-center justify-between gap-4">
           <div>
             <h1 className="text-2xl md:text-3xl font-semibold tracking-tight">Status Page</h1>
@@ -213,21 +197,21 @@ export default function StatusPagesPage() {
               <RefreshCw className={`w-4 h-4 ${refreshing ? "animate-spin" : ""}`} />
               Refresh
             </button>
-            <button
+            {/* <button
               type="button"
               onClick={openNewPage}
               className="h-10 px-4 rounded-lg bg-[#d3d6dc] text-[#121417] text-sm font-semibold inline-flex items-center gap-2"
             >
               <Plus className="w-4 h-4" />
               New Page
-            </button>
-            <button
+            </button> */}
+            {/* <button
               type="button"
               onClick={logout}
               className="h-10 px-3 rounded-lg border border-[#252a33] bg-[#14181e] text-[#d4dae4] text-sm"
             >
               Logout
-            </button>
+            </button> */}
           </div>
         </header>
 
@@ -479,7 +463,6 @@ export default function StatusPagesPage() {
           </section>
 
         </div>
-      </main>
     </div>
   );
 }

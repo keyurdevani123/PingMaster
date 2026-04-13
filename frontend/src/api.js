@@ -366,6 +366,48 @@ export async function fetchTeamInvites(user) {
   return payload;
 }
 
+export async function fetchBilling(user) {
+  const cacheKey = `billing:${user.uid}:${getWorkspaceCacheScope()}`;
+  const cached = readApiCache(cacheKey, API_CACHE_TTL_MS);
+  if (cached) return cached;
+
+  const res = await fetch(`${WORKER_URL}/billing`, { headers: await authHeaders(user) });
+  const payload = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(payload?.error || "Failed to load billing details");
+  }
+  writeApiCache(cacheKey, payload);
+  return payload;
+}
+
+export async function createBillingSubscription(user, payload = {}) {
+  const res = await fetch(`${WORKER_URL}/billing/subscribe`, {
+    method: "POST",
+    headers: await authHeaders(user),
+    body: JSON.stringify(payload),
+  });
+  const result = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(result?.error || "Failed to start billing checkout");
+  }
+  clearApiCache();
+  return result;
+}
+
+export async function verifyBillingSubscription(user, payload) {
+  const res = await fetch(`${WORKER_URL}/billing/verify`, {
+    method: "POST",
+    headers: await authHeaders(user),
+    body: JSON.stringify(payload),
+  });
+  const result = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(result?.error || "Failed to verify billing payment");
+  }
+  clearApiCache();
+  return result;
+}
+
 export async function createTeamInvite(user, email) {
   const res = await fetch(`${WORKER_URL}/team/invites`, {
     method: "POST",

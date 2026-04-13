@@ -1,4 +1,5 @@
 ﻿import { useCallback, useEffect, useMemo, useState } from "react";
+import PageLoader from "../../components/PageLoader";
 import {
   RefreshCw,
   LayoutGrid,
@@ -556,46 +557,18 @@ export default function MonitorDetailsPage() {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-[#08090b] text-[#f2f2f2] grid place-items-center">
-        <p className="text-[#8d94a0]">Loading monitor details...</p>
-      </div>
+      <PageLoader />
     );
   }
 
   if (!monitor) {
     return (
-      <div className="min-h-screen bg-[#08090b] text-[#f2f2f2] grid place-items-center px-4">
-        <div className="text-center">
-          <p className="text-lg font-semibold">{error || "Monitor unavailable"}</p>
-          <button
-            type="button"
-            onClick={() => navigate(fallbackParentId ? `/monitors/${fallbackParentId}` : "/dashboard")}
-            className="mt-4 h-10 px-4 rounded-lg border border-[#2a2f39] text-sm"
-          >
-            {fallbackParentId ? "Open Parent Monitor" : "Open Dashboard"}
-          </button>
-        </div>
-      </div>
+      <PageLoader />
     );
   }
 
   return (
-    <div className="h-screen bg-[#08090b] text-[#f2f2f2] flex overflow-hidden">
-      <aside className="hidden md:flex w-64 h-screen sticky top-0 overflow-hidden flex-col border-r border-[#22252b] bg-[#0f1114]">
-        <div className="px-5 py-6 border-b border-[#22252b]">
-          <h1 className="text-xl font-semibold tracking-tight">PingMaster</h1>
-          <p className="text-[11px] uppercase tracking-[0.09em] text-[#8d94a0] mt-1">Uptime Control</p>
-        </div>
-        <nav className="flex-1 px-3 py-4 space-y-1">
-          <NavItem Icon={LayoutGrid} label="Dashboard" onClick={() => navigate("/dashboard")} active />
-          <NavItem Icon={AlertTriangle} label="Incidents" onClick={() => navigate("/incidents")} />
-          <NavItem Icon={Siren} label="Alerts" onClick={() => navigate("/alerts")} />
-          <NavItem Icon={Globe} label="Status Page" onClick={() => navigate("/status-pages")} />
-          <NavItem Icon={Users} label="Team" onClick={() => navigate("/team")} />
-        </nav>
-      </aside>
-
-      <main className="flex-1 min-w-0 overflow-y-auto">
+    <div className="min-h-screen text-[#f2f2f2]">
         <header className="sticky top-0 z-20 border-b border-[#22252b] bg-[#0d0f13] px-5 md:px-8 py-2.5 flex items-start justify-between gap-4">
           <div className="min-w-0">
             <div className="min-w-0">
@@ -1079,8 +1052,6 @@ export default function MonitorDetailsPage() {
               </div>
             </section>
           )}
-        </main>
-      </main>
 
       {maintenanceOpen ? (
         <MaintenancePlannerModal
@@ -1103,6 +1074,7 @@ export default function MonitorDetailsPage() {
           onReset={resetMaintenanceEditor}
         />
       ) : null}
+      </main>
     </div>
   );
 }

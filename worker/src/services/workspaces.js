@@ -1,3 +1,9 @@
+import {
+  buildBillingSummary,
+  getFeatureFlags,
+  getWorkspaceBilling,
+} from "./billing.js";
+
 const PERSONAL_WORKSPACE_PREFIX = "ws_";
 const TEAM_WORKSPACE_PREFIX = "wst_";
 const ACTIVE_MEMBER_STATUS = "active";
@@ -31,16 +37,6 @@ function slugifyWorkspaceName(value) {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 40);
-}
-
-export function getFeatureFlags() {
-  return {
-    homepage: true,
-    statusPages: true,
-    teamFoundation: true,
-    geminiInsights: false,
-    visibilityMonitoring: false,
-  };
 }
 
 export function getWorkspaceCollectionKey(workspaceId, collection) {
@@ -388,6 +384,8 @@ export async function buildBootstrapPayload(redis, auth, requestedWorkspaceId = 
       email: userEmail,
     });
   const workspaces = await listUserWorkspaces(redis, userId);
+  const billing = await getWorkspaceBilling(redis, currentWorkspace);
+  const billingSummary = buildBillingSummary(billing);
   return {
     userId,
     email: userEmail,
@@ -396,6 +394,8 @@ export async function buildBootstrapPayload(redis, auth, requestedWorkspaceId = 
     currentMembershipRole: currentMembership?.role || "owner",
     workspaces,
     featureFlags: getFeatureFlags(),
+    billing: billingSummary,
+    entitlements: billingSummary.entitlements,
   };
 }
 

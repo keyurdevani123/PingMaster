@@ -1,4 +1,5 @@
 ﻿import { useCallback, useEffect, useMemo, useState } from "react";
+import PageLoader from "../../components/PageLoader";
 import { Save, RefreshCw, Search, CheckSquare, Square, Network, Layers3, Radar } from "lucide-react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useAuth } from "../../context/AuthContext";
@@ -138,9 +139,7 @@ export default function MonitorEndpointsPage() {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-[#08090b] text-[#f2f2f2] grid place-items-center">
-        <p className="text-[#8d94a0]">Loading endpoint manager...</p>
-      </div>
+      <PageLoader />
     );
   }
 

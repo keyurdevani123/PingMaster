@@ -1,28 +1,47 @@
-import { Activity, AlertTriangle, BellRing, ChevronRight, Globe, ShieldCheck, Zap } from "lucide-react";
-import { Navigate, useNavigate } from "react-router-dom";
+import {
+  Activity,
+  AlertTriangle,
+  BellRing,
+  ChevronRight,
+  Globe,
+  ShieldCheck,
+  Users,
+} from "lucide-react";
+import { useNavigate } from "react-router-dom";
 import { useAuth } from "../../context/AuthContext";
 
-const FEATURE_ITEMS = [
+const CAPABILITIES = [
   {
     title: "Availability Monitoring",
-    description: "Track website uptime, latency, and endpoint health from one dashboard without adding operational clutter.",
+    description: "Track websites and important endpoints in one dashboard with response status and health context that is easy to review.",
     Icon: Activity,
   },
   {
-    title: "Actionable Performance Guidance",
-    description: "Use PSI results to surface the fixes that matter first, instead of reading through raw audit output alone.",
-    Icon: Zap,
+    title: "Alert Routing",
+    description: "Send alerts through the channels you already use, including email, Slack, and Discord.",
+    Icon: BellRing,
   },
   {
-    title: "Incidents and Alerts Together",
-    description: "Move from issue detection to alert delivery and incident handling in one connected workflow.",
+    title: "Incident Tracking",
+    description: "Create incidents, add updates, and keep operational history close to the affected services.",
     Icon: AlertTriangle,
   },
   {
-    title: "Public Reliability Updates",
-    description: "Publish a simple status page for selected monitors so users can see service health without opening the app.",
+    title: "Status Pages",
+    description: "Publish customer-facing status pages for the monitors you choose to expose.",
     Icon: Globe,
   },
+  {
+    title: "Workspace Sharing",
+    description: "Keep your main workspace private and open separate shared workspaces when a team needs access.",
+    Icon: Users,
+  },
+];
+
+const DETAILS = [
+  "Track website and endpoint availability without splitting the workflow across separate tools.",
+  "Keep incident context, response updates, and public status communication close to the affected service.",
+  "Use shared workspaces only for services that need team access, while the rest stays private.",
 ];
 
 export default function HomePage() {
@@ -31,7 +50,6 @@ export default function HomePage() {
 
   return (
     <div className="min-h-screen bg-[#08090b] text-[#f2f2f2] overflow-x-hidden">
-      {/* ── Top Navigation ── */}
       <header className="sticky top-0 z-50 border-b border-[#1f232b] bg-[#0d0f13]/80 backdrop-blur-md w-full">
         <div className="w-full px-6 md:px-12 py-5 flex items-center justify-between gap-4">
           <div>
@@ -51,30 +69,25 @@ export default function HomePage() {
               onClick={() => navigate("/signup")}
               className="h-10 px-5 rounded-lg bg-white text-black hover:bg-[#e2e8f0] text-sm font-semibold transition shadow-sm"
             >
-              Sign Up Free
+              Create Account
             </button>
           </div>
         </div>
       </header>
 
-      {/* ── Hero Loading Full Screen Width ── */}
-      <main className="w-full">
-        {/* HERO SECTION */}
-        <section className="relative w-full px-6 md:px-12 py-12 md:py-20 flex flex-col items-center text-center bg-[radial-gradient(ellipse_at_top,_rgba(120,135,255,0.08),_transparent_60%)]">
-          <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 backdrop-blur-md px-4 py-1.5 text-xs text-[#b8c1cf] shadow-sm mb-6">
+      <main>
+        <section className="relative px-6 md:px-12 py-14 md:py-24 text-center bg-[radial-gradient(circle_at_top,_rgba(140,180,255,0.12),_transparent_58%)]">
+          <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-4 py-1.5 text-xs text-[#b8c1cf] mb-6">
             <ShieldCheck className="w-4 h-4 text-[#7be0b7]" />
-            Enterprise-Grade Incident Workflows
+            Website monitoring, alerts, incidents, and status updates
           </div>
-          
-          {/* Properly sized typography as requested */}
-          <h2 className="max-w-4xl text-4xl md:text-[44px] font-bold tracking-tight text-white leading-tight">
-            Monitoring, incidents, and status in one clean workflow.
+          <h2 className="max-w-4xl mx-auto text-4xl md:text-[46px] font-bold tracking-tight text-white leading-tight">
+            Monitor websites, handle incidents, and keep status communication in one place.
           </h2>
-          
-          <p className="mt-6 max-w-2xl text-lg text-[#94a3b8] leading-relaxed">
-            PingMaster helps you monitor availability, review endpoint health, act on PSI guidance, and publish public reliability updates without bouncing between tools.
+          <p className="mt-6 max-w-3xl mx-auto text-lg leading-relaxed text-[#94a3b8]">
+            PingMaster lets you track service availability, send alerts to the channels your team already uses,
+            record incident updates, publish public status pages, and create shared workspaces only when collaboration is needed.
           </p>
-          
           <div className="mt-10 flex items-center justify-center gap-4">
             {!loading && user ? (
               <button
@@ -82,7 +95,7 @@ export default function HomePage() {
                 onClick={() => navigate("/dashboard")}
                 className="h-14 px-8 rounded-xl bg-white text-black hover:bg-[#e2e8f0] text-base font-semibold inline-flex items-center gap-2 transition hover:-translate-y-1 hover:shadow-lg"
               >
-                Go to Dashboard
+                Open Dashboard
                 <ChevronRight className="w-5 h-5" />
               </button>
             ) : (
@@ -91,99 +104,69 @@ export default function HomePage() {
                 onClick={() => navigate("/signup")}
                 className="h-14 px-8 rounded-xl bg-white text-black hover:bg-[#e2e8f0] text-base font-semibold inline-flex items-center gap-2 transition hover:-translate-y-1 hover:shadow-lg"
               >
-                Start Monitoring For Free
+                Start Monitoring
                 <ChevronRight className="w-5 h-5" />
               </button>
             )}
           </div>
-          <div className="mt-5 flex items-center justify-center gap-2 text-sm text-[#64748b]">
-            <BellRing className="w-4 h-4 text-[#94a3b8]" />
-            Discord, Slack, and Email alert routing supported.
-          </div>
-
         </section>
 
-        {/* FEATURES GRID SECTION - Wide Layout */}
-        <section className="w-full px-6 md:px-12 py-12 md:py-16 bg-[#0a0c10] border-y border-white/5">
+        <section className="px-6 md:px-12 py-12 md:py-16 bg-[#0a0c10] border-y border-white/5">
           <div className="max-w-7xl mx-auto">
-            <h3 className="text-3xl font-bold text-white mb-8 text-center">Engineered for Reliability</h3>
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-              {FEATURE_ITEMS.map((item) => (
-                <article key={item.title} className="group rounded-[24px] border border-white/5 bg-[#0d1016] p-8 transition hover:border-white/10 hover:-translate-y-1 hover:bg-[#11161d]">
-                  <div className="h-14 w-14 rounded-2xl bg-white/5 border border-white/10 grid place-items-center transition group-hover:scale-110 group-hover:bg-white/10">
-                    <item.Icon className="w-6 h-6 text-[#91b4ff]" />
+            <div className="text-center mb-10">
+              <p className="text-sm uppercase tracking-[0.14em] text-[#64748b]">What You Can Manage</p>
+              <h3 className="mt-3 text-3xl font-bold text-white">The core workflow real teams need</h3>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-6">
+              {CAPABILITIES.map((item) => (
+                <article key={item.title} className="rounded-[24px] border border-white/5 bg-[#0d1016] p-6 transition hover:border-white/10 hover:-translate-y-1 hover:bg-[#11161d]">
+                  <div className="h-12 w-12 rounded-2xl bg-white/5 border border-white/10 grid place-items-center">
+                    <item.Icon className="w-6 h-6 text-[#9cc0ff]" />
                   </div>
-                  <h4 className="mt-8 text-xl font-semibold text-white tracking-tight">{item.title}</h4>
-                  <p className="mt-4 text-[15px] leading-relaxed text-[#94a3b8]">{item.description}</p>
+                  <h4 className="mt-6 text-lg font-semibold text-white tracking-tight">{item.title}</h4>
+                  <p className="mt-3 text-sm leading-6 text-[#94a3b8]">{item.description}</p>
                 </article>
               ))}
             </div>
           </div>
         </section>
 
-        {/* WORKFLOW SECTION - Stretched out */}
-        <section className="w-full px-6 md:px-12 py-12 md:py-16 bg-[radial-gradient(ellipse_at_bottom_right,_rgba(89,170,255,0.05),_transparent_50%)]">
-          <div className="max-w-4xl mx-auto space-y-10">
-            <div className="text-center">
-              <p className="text-sm uppercase tracking-[0.15em] font-medium text-[#64748b]">How It Works</p>
-              <h3 className="text-2xl md:text-3xl font-bold text-white mt-4">A complete workflow from ping to resolution</h3>
+        <section className="px-6 md:px-12 py-12 md:py-16 bg-[radial-gradient(circle_at_bottom_right,_rgba(90,160,255,0.08),_transparent_46%)]">
+          <div className="max-w-6xl mx-auto grid grid-cols-1 lg:grid-cols-[1.1fr_0.9fr] gap-8 items-start">
+            <div className="rounded-[28px] border border-[#1d2430] bg-[#0d1016] p-8">
+              <p className="text-sm uppercase tracking-[0.14em] text-[#64748b]">Operational Detail</p>
+              <h3 className="mt-4 text-3xl font-bold text-white tracking-tight">Built around day-to-day monitoring work</h3>
+              <p className="mt-4 text-base leading-7 text-[#94a3b8]">
+                This is not just a landing page headline. In PingMaster, users can add monitors, review uptime and response status,
+                send alerts, maintain an incident timeline, expose selected services on status pages, and separate private work from team work with dedicated shared workspaces.
+              </p>
             </div>
-            
-            <div className="space-y-0 relative before:absolute before:inset-0 before:ml-4 before:-translate-x-px md:before:mx-auto md:before:translate-x-0 before:h-full before:w-0.5 before:bg-gradient-to-b before:from-transparent before:via-[#1e2430] before:to-transparent">
-              <WorkflowStep
-                num="01"
-                title="Monitor websites and endpoints"
-                description="Track response time, status, and endpoint coverage across all global regions seamlessly from your customizable workspace."
-              />
-              <WorkflowStep
-                num="02"
-                title="Confirm real failures"
-                description="Our servers retry checks up to three times from independent geographic nodes so false spikes do not dominate the workflow."
-              />
-              <WorkflowStep
-                num="03"
-                title="Route alerts and manage incidents"
-                description="Automatically dispatch payloads to Slack or Discord and keep a permanent response history attached to the unified incident log."
-              />
-              <WorkflowStep
-                num="04"
-                title="Share public health updates"
-                description="Instantly expose selected services through a beautiful, clean status page so your customers never have to guess if you are online."
-              />
+
+            <div className="space-y-4">
+              {DETAILS.map((item) => (
+                <div key={item} className="rounded-[24px] border border-[#1d2430] bg-[#0f141c] px-5 py-5 text-sm leading-6 text-[#a4adbc]">
+                  {item}
+                </div>
+              ))}
             </div>
           </div>
         </section>
 
-        {/* BOTTOM CTA SECTION - Makes the page explicitly longer */}
-        <section className="w-full px-6 md:px-12 py-12 md:py-16 bg-[#08090b] border-t border-[#1f232b] text-center">
-          <h3 className="text-3xl md:text-4xl font-bold text-white mb-4 tracking-tight">Ready to fortify your endpoints?</h3>
-          <p className="text-base md:text-lg text-[#94a3b8] mb-8 max-w-xl mx-auto">Join hundreds of engineers who trust PingMaster to monitor their production architecture every single day.</p>
+        <section className="px-6 md:px-12 py-14 md:py-18 bg-[#08090b] border-t border-[#1f232b] text-center">
+          <h3 className="text-3xl md:text-4xl font-bold text-white tracking-tight">Start with your private workspace and grow only when needed</h3>
+          <p className="mt-4 max-w-2xl mx-auto text-base md:text-lg leading-7 text-[#94a3b8]">
+            Keep your own monitors in a private workspace first. When a service needs team ownership, create a separate shared workspace for it.
+          </p>
           <button
             type="button"
             onClick={() => navigate("/signup")}
-            className="h-14 px-8 rounded-xl bg-white text-black hover:bg-[#e2e8f0] text-base font-semibold inline-flex items-center gap-2 transition hover:-translate-y-1 hover:shadow-lg"
+            className="mt-8 h-14 px-8 rounded-xl bg-white text-black hover:bg-[#e2e8f0] text-base font-semibold inline-flex items-center gap-2 transition hover:-translate-y-1 hover:shadow-lg"
           >
-            Create Your Free Account
+            Create Your Account
             <ChevronRight className="w-5 h-5" />
           </button>
         </section>
       </main>
-    </div>
-  );
-}
-
-function WorkflowStep({ num, title, description }) {
-  return (
-    <div className="relative flex items-center justify-between md:justify-normal md:odd:flex-row-reverse group is-active py-8">
-      {/* Icon/Number */}
-      <div className="flex items-center justify-center w-10 h-10 rounded-full border-4 border-[#08090b] bg-[#1a202c] text-white text-xs font-bold shrink-0 md:order-1 md:group-odd:-translate-x-1/2 md:group-even:translate-x-1/2 shadow-[0_0_15px_rgba(255,255,255,0.05)] z-10 transition group-hover:scale-110 group-hover:bg-[#202836]">
-        {num}
-      </div>
-      {/* Card */}
-      <div className="w-[calc(100%-4rem)] md:w-[calc(50%-3rem)] rounded-[24px] border border-white/5 bg-[#0d1016] p-8 glass shadow-lg transition hover:border-white/10 hover:-translate-y-1">
-        <h4 className="text-xl font-semibold text-white tracking-tight">{title}</h4>
-        <p className="text-[15px] text-[#94a3b8] mt-3 leading-relaxed">{description}</p>
-      </div>
     </div>
   );
 }

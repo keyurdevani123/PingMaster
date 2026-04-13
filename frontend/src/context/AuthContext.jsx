@@ -25,9 +25,12 @@ function buildFallbackWorkspace(firebaseUser) {
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);      // null = not logged in
   const [loading, setLoading] = useState(true); // true while Firebase checks session
+  const [workspaceSwitching, setWorkspaceSwitching] = useState(false);
   const [workspace, setWorkspace] = useState(null);
   const [workspaces, setWorkspaces] = useState([]);
   const [featureFlags, setFeatureFlags] = useState({});
+  const [billing, setBilling] = useState(null);
+  const [entitlements, setEntitlements] = useState({});
   const [bootstrapError, setBootstrapError] = useState("");
   const [currentMembershipRole, setCurrentMembershipRole] = useState("owner");
 
@@ -43,6 +46,8 @@ export function AuthProvider({ children }) {
     setWorkspace(nextWorkspace);
     setWorkspaces(bootstrapWorkspaces);
     setFeatureFlags(bootstrap?.featureFlags || {});
+    setBilling(bootstrap?.billing || null);
+    setEntitlements(bootstrap?.entitlements || bootstrap?.billing?.entitlements || {});
     setCurrentMembershipRole(bootstrap?.currentMembershipRole || nextWorkspace?.currentRole || "owner");
     setApiWorkspaceId(nextWorkspace?.id || "", { clear: true });
     try {
@@ -69,7 +74,10 @@ export function AuthProvider({ children }) {
         setWorkspace(null);
         setWorkspaces([]);
         setFeatureFlags({});
+        setBilling(null);
+        setEntitlements({});
         setCurrentMembershipRole("owner");
+        setWorkspaceSwitching(false);
         setLoading(false);
         return;
       }
@@ -90,10 +98,15 @@ export function AuthProvider({ children }) {
         setWorkspace(fallbackWorkspace);
         setWorkspaces([fallbackWorkspace]);
         setFeatureFlags({});
+        setBilling(null);
+        setEntitlements({});
         setCurrentMembershipRole("owner");
         setBootstrapError(err?.message || "Could not load workspace context.");
       } finally {
-        if (active) setLoading(false);
+        if (active) {
+          setWorkspaceSwitching(false);
+          setLoading(false);
+        }
       }
     });
 
@@ -105,16 +118,20 @@ export function AuthProvider({ children }) {
   }, []);
 
   const logout = () => signOut(auth);
+  const refreshSession = async () => {
+    if (!user) return;
+    await loadBootstrap(user, workspace?.id || "");
+  };
   const selectWorkspace = async (workspaceId) => {
     if (!user || !workspaceId || workspaceId === workspace?.id) return;
-    setLoading(true);
+    setWorkspaceSwitching(true);
     setBootstrapError("");
     try {
       await loadBootstrap(user, workspaceId);
     } catch (err) {
       setBootstrapError(err?.message || "Could not switch workspace.");
     } finally {
-      setLoading(false);
+      setWorkspaceSwitching(false);
     }
   };
 
@@ -122,13 +139,17 @@ export function AuthProvider({ children }) {
     <AuthContext.Provider value={{
       user,
       loading,
+      workspaceSwitching,
       logout,
       workspace,
       workspaces,
       featureFlags,
+      billing,
+      entitlements,
       bootstrapError,
       currentMembershipRole,
       selectWorkspace,
+      refreshSession,
     }}
     >
       {children}

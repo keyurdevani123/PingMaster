@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import PageLoader from "../../components/PageLoader";
 import {
   AlertTriangle,
   Bell,
@@ -32,7 +33,6 @@ const CHANNEL_FORM_DEFAULTS = {
   name: "",
   enabled: true,
   webhookUrl: "",
-  fromEmail: "",
   recipientEmails: "",
 };
 
@@ -59,6 +59,12 @@ const CHANNEL_TYPES = [
   { value: "slack", label: "Slack" },
   { value: "email", label: "Email" },
 ];
+
+const CHANNEL_PRESETS = [
+  { type: "email",   label: "Email",   Icon: Mail,  hint: "Send via Resend" },
+  { type: "slack",   label: "Slack",   Icon: Slack, hint: "Webhook delivery" },
+  { type: "discord", label: "Discord", Icon: Bell,  hint: "Webhook delivery" },
+];
 const ALERT_EVENTS_PAGE_SIZE = 10;
 const DEFERRED_MONITOR_LOAD_MS = 450;
 // Events are now loaded in parallel with channels/policies, not deferred,
@@ -83,6 +89,7 @@ export default function AlertsPage() {
   const [showChannelModal, setShowChannelModal] = useState(false);
   const [editingChannelId, setEditingChannelId] = useState("");
   const [channelForm, setChannelForm] = useState(CHANNEL_FORM_DEFAULTS);
+  const [modalError, setModalError] = useState("");
 
   const [showDefaultPolicyModal, setShowDefaultPolicyModal] = useState(false);
   const [defaultPolicyViewMode, setDefaultPolicyViewMode] = useState("view");
@@ -206,6 +213,7 @@ export default function AlertsPage() {
       : (monitorsLoading && monitors.length === 0 ? "--" : monitors.length),
     overrides: monitorPolicies.length,
     failedEvents: eventsLoaded ? events.filter((event) => event.status === "failed").length : "--",
+    sentEvents:   eventsLoaded ? events.filter((event) => event.status === "sent").length   : "--",
   }), [channels, defaultPolicy.applyMode, defaultPolicy.targetMonitorIds.length, events, eventsLoaded, monitorPolicies.length, monitors.length, monitorsLoading]);
 
   const paginatedEvents = useMemo(() => {
@@ -220,10 +228,17 @@ export default function AlertsPage() {
   function resetChannelForm() {
     setChannelForm(CHANNEL_FORM_DEFAULTS);
     setEditingChannelId("");
+    setModalError("");
   }
 
   function openCreateChannel() {
     resetChannelForm();
+    setShowChannelModal(true);
+  }
+
+  function openCreateChannelOfType(type) {
+    resetChannelForm();
+    setChannelForm((prev) => ({ ...prev, type }));
     setShowChannelModal(true);
   }
 
@@ -279,11 +294,10 @@ export default function AlertsPage() {
     try {
       const payload = {
         type: channelForm.type,
-        name: channelForm.name.trim(),
+        name: channelForm.name.trim() || channelForm.type,
         enabled: channelForm.enabled,
         config: channelForm.type === "email"
           ? {
-            fromEmail: channelForm.fromEmail.trim(),
             recipientEmails: channelForm.recipientEmails
               .split(",")
               .map((value) => value.trim())
@@ -306,7 +320,7 @@ export default function AlertsPage() {
       setShowChannelModal(false);
       resetChannelForm();
     } catch (err) {
-      setError(err?.message || "Could not save alert channel.");
+      setModalError(err?.message || "Could not save alert channel.");
     } finally {
       setSubmitting(false);
     }
@@ -389,29 +403,12 @@ export default function AlertsPage() {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-[#08090b] text-[#f2f2f2] grid place-items-center">
-        <p className="text-[#8d94a0]">Loading alerts...</p>
-      </div>
+      <PageLoader />
     );
   }
 
   return (
-    <div className="h-screen bg-[#08090b] text-[#f2f2f2] flex overflow-hidden">
-      <aside className="hidden md:flex w-64 h-screen sticky top-0 overflow-hidden flex-col border-r border-[#22252b] bg-[#0f1114]">
-        <div className="px-5 py-6 border-b border-[#22252b]">
-          <h1 className="text-xl font-semibold tracking-tight">PingMaster</h1>
-          <p className="text-[11px] uppercase tracking-[0.09em] text-[#8d94a0] mt-1">Web Monitor</p>
-        </div>
-        <nav className="flex-1 px-3 py-4 space-y-1">
-          <NavItem Icon={LayoutGrid} label="Dashboard" onClick={() => navigate("/dashboard")} />
-          <NavItem Icon={AlertTriangle} label="Incidents" onClick={() => navigate("/incidents")} />
-          <NavItem Icon={Siren} label="Alerts" active />
-          <NavItem Icon={Globe} label="Status Page" onClick={() => navigate("/status-pages")} />
-          <NavItem Icon={Users} label="Team" onClick={() => navigate("/team")} />
-        </nav>
-      </aside>
-
-      <main className="flex-1 min-w-0 overflow-y-auto">
+    <div className="min-h-screen text-[#f2f2f2]">
         <header className="sticky top-0 z-20 border-b border-[#22252b] bg-[#0d0f13] px-5 md:px-8 py-4 flex items-center justify-between gap-4">
           <div>
             <h1 className="text-2xl md:text-3xl font-semibold tracking-tight">Alert Routing</h1>
@@ -427,23 +424,6 @@ export default function AlertsPage() {
               <RefreshCw className={`w-4 h-4 ${refreshing ? "animate-spin" : ""}`} />
               Refresh
             </button>
-            {isOwner ? (
-              <button
-                type="button"
-                onClick={openCreateChannel}
-                className="h-10 px-4 rounded-lg bg-[#d3d6dc] text-[#121417] text-sm font-semibold inline-flex items-center gap-2"
-              >
-                <Plus className="w-4 h-4" />
-                Add Channel
-              </button>
-            ) : null}
-            <button
-              type="button"
-              onClick={logout}
-              className="h-10 px-3 rounded-lg border border-[#252a33] bg-[#14181e] text-[#d4dae4] text-sm"
-            >
-              Logout
-            </button>
           </div>
         </header>
 
@@ -454,89 +434,103 @@ export default function AlertsPage() {
             </div>
           )}
 
-          <section className="grid grid-cols-2 xl:grid-cols-4 gap-3">
-            <SummaryCard label="Active Channels" value={summary.activeChannels} caption="Enabled delivery destinations" />
-            <SummaryCard label="Default Coverage" value={summary.defaultCoverage} caption={defaultPolicy.applyMode === "selected" ? "Selected monitors use the main rule" : "All monitors use the main rule"} />
-            <SummaryCard label="Custom Rules" value={summary.overrides} caption="Monitors with their own rule" />
-            <SummaryCard label="Failed Deliveries" value={summary.failedEvents} caption="Recent channel failures" />
+          <section className="grid grid-cols-2 xl:grid-cols-5 gap-3">
+            <SummaryCard label="Active Channels"    value={summary.activeChannels}  caption="Enabled destinations" />
+            <SummaryCard label="Successful Sends"   value={summary.sentEvents}       caption="Delivered this session"  />
+            <SummaryCard label="Failed Deliveries"  value={summary.failedEvents}      caption="Recent failures" />
+            <SummaryCard label="Default Coverage"   value={summary.defaultCoverage}  caption={defaultPolicy.applyMode === "selected" ? "Selected monitors" : "All monitors"} />
+            <SummaryCard label="Custom Rules"        value={summary.overrides}         caption="Monitor overrides" />
           </section>
 
-          <section className="bg-[#0f1217] border border-[#22252b] rounded-xl p-4 md:p-5">
+          <section className="bg-[#0f1217] border border-[#22252b] rounded-xl p-5 md:p-7">
             <div className="flex items-center justify-between gap-3 mb-4">
               <div>
                 <h2 className="text-sm font-medium text-[#edf2fb]">Delivery Channels</h2>
-                <p className="text-sm text-[#8d94a0] mt-1">
+                <p className="text-sm text-[#8d94a0] mt-2">
                   {isOwner
-                    ? "These shared workspace channels are managed by the owner and used by the alert rules below."
-                    : "These shared workspace channels are managed by the owner. Members can review them here, but only the owner can change delivery routing."}
+                    ? "Click a channel to configure it. Each channel type can be added once."
+                    : "These channels are managed by the owner or admin."}
                 </p>
               </div>
-              {isOwner ? (
-                <button
-                  type="button"
-                  onClick={openCreateChannel}
-                  className="h-10 px-4 rounded-lg border border-[#2a2f39] bg-[#14181e] text-sm text-[#d7deea]"
-                >
-                  New Channel
-                </button>
-              ) : null}
             </div>
 
-            {channels.length === 0 ? (
-              <EmptyCard message="No channels configured yet." />
-            ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-                {channels.map((channel) => {
-                  const meta = getChannelMeta(channel.type);
-                  const health = getChannelHealthMeta(channel);
-                  return (
-                    <article key={channel.id} className="rounded-xl border border-[#252a33] bg-[#12161d] p-4 space-y-3">
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-2">
-                            <meta.Icon className="w-4 h-4 text-[#9cb7ff]" />
-                            <p className="text-sm font-medium text-[#edf2fb] truncate">{channel.name}</p>
-                          </div>
-                          <p className="text-xs text-[#8d94a0] mt-1">{meta.label}</p>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              {CHANNEL_PRESETS.map((preset) => {
+                const existing = channels.find((c) => c.type === preset.type);
+                const health = existing ? getChannelHealthMeta(existing) : null;
+                const hasSuccess = existing?.lastDeliveryAt;
+                return (
+                  <button
+                    key={preset.type}
+                    type="button"
+                    onClick={() => isOwner && (existing ? openEditChannel(existing) : openCreateChannelOfType(preset.type))}
+                    disabled={!isOwner}
+                    className={`relative w-full rounded-xl border p-5 text-left transition ${
+                      existing ? "border-[#252a33] bg-[#12161d] hover:bg-[#171c25]" : "border-dashed border-[#2a2f39] bg-[#0c0e12] hover:bg-[#0f1218]"
+                    } ${!isOwner ? "cursor-default" : "cursor-pointer"}`}
+                  >
+                    {/* Status badge */}
+                    {existing && (
+                      <span className={`absolute top-4 right-4 text-[11px] px-2.5 py-0.5 rounded-full font-medium ${
+                        existing.enabled ? "bg-[#123828] text-[#69e7ba]" : "bg-[#2b323f] text-[#bcc5d2]"
+                      }`}>
+                        {existing.enabled ? "Enabled" : "Disabled"}
+                      </span>
+                    )}
+
+                    {/* Icon + type */}
+                    <div className="flex items-center gap-3 mb-4">
+                      <div className={`w-11 h-11 rounded-xl grid place-items-center shrink-0 ${
+                        existing ? "bg-[#1a1f2e] border border-[#252a33]" : "bg-[#13161e] border border-[#222830]"
+                      }`}>
+                        <preset.Icon className="w-5 h-5 text-[#8b93a5]" />
+                      </div>
+                      <div>
+                        <p className="text-[15px] font-semibold text-[#edf2fb]">{preset.label}</p>
+                        <p className="text-[12px] text-[#6b7280] mt-0.5">{preset.hint}</p>
+                      </div>
+                    </div>
+
+                    {existing ? (
+                      <div className="space-y-2">
+                        {/* <p className="text-[12px] text-[#8d94a0] break-all leading-relaxed">{describeChannelConfig(existing)}</p> */}
+                        <div className="flex items-center gap-2 flex-wrap">
+                          {health && <span className={`text-[11px] px-2 py-0.5 rounded-full ${health.className}`}>{health.label}</span>}
+                          {hasSuccess && <span className="text-[11px] text-[#69e7ba] font-medium">✓ Last sent: {formatTimestamp(existing.lastDeliveryAt)}</span>}
                         </div>
-                        <span className={`text-[11px] px-2 py-1 rounded-full ${channel.enabled ? "bg-[#123828] text-[#69e7ba]" : "bg-[#2b323f] text-[#bcc5d2]"}`}>
-                          {channel.enabled ? "Enabled" : "Disabled"}
+                        <div className="flex items-center gap-2 mt-4.5">
+                          {isOwner && (
+                            <span
+                              role="button"
+                              tabIndex={0}
+                              onClick={(e) => { e.stopPropagation(); handleSendTest(existing.id); }}
+                              onKeyDown={(e) => e.key === "Enter" && (e.stopPropagation(), handleSendTest(existing.id))}
+                              className={`text-[15px] px-3 py-1.5 rounded-lg border border-[#2a2f39] bg-[#14181e] text-[#d7deea] hover:bg-[#1e2330] transition ${
+                                testingChannelId === existing.id ? "opacity-50 pointer-events-none" : ""
+                              }`}
+                            >
+                              {testingChannelId === existing.id ? "Testing…" : "Send Test"}
+                            </span>
+                          )}
+                          {isOwner && (
+                            <span className="text-[15px] px-3 py-1.5 rounded-lg border border-[#2a2f39] bg-[#14181e] text-[#d7deea] hover:bg-[#1e2330] transition">
+                              Edit
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-2 mt-2">
+                        <Plus className="w-4 h-4 text-[#6b7280]" />
+                        <span className="text-[13px] text-[#6b7280]">
+                          {isOwner ? `Connect ${preset.label}` : "Not configured"}
                         </span>
                       </div>
-                      <p className="text-xs text-[#c9d1dd] break-words leading-relaxed">{describeChannelConfig(channel)}</p>
-                      <div className="flex flex-wrap items-center gap-2 text-xs text-[#8d94a0]">
-                        <span className={`px-2 py-1 rounded-full ${health.className}`}>{health.label}</span>
-                        <span>Last success: {formatTimestamp(channel.lastDeliveryAt)}</span>
-                        {channel.lastFailureAt ? <span>Last failure: {formatTimestamp(channel.lastFailureAt)}</span> : null}
-                      </div>
-                      {isOwner ? (
-                        <div className="flex items-center gap-2">
-                          <button
-                            type="button"
-                            onClick={() => handleSendTest(channel.id)}
-                            disabled={testingChannelId === channel.id}
-                            className="h-9 px-3 rounded-lg border border-[#2a2f39] bg-[#14181e] text-sm text-[#d7deea] disabled:opacity-50"
-                          >
-                            {testingChannelId === channel.id ? "Testing..." : "Send Test"}
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => openEditChannel(channel)}
-                            className="h-9 px-3 rounded-lg border border-[#2a2f39] bg-[#14181e] text-sm text-[#d7deea]"
-                          >
-                            Edit
-                          </button>
-                        </div>
-                      ) : (
-                        <div className="rounded-lg border border-[#252a33] bg-[#14181e] px-3 py-2 text-xs text-[#8d94a0]">
-                          Owner managed
-                        </div>
-                      )}
-                    </article>
-                  );
-                })}
-              </div>
-            )}
+                    )}
+                  </button>
+                );
+              })}
+            </div>
           </section>
 
           <section className="grid grid-cols-1 xl:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)] gap-5">
@@ -721,50 +715,32 @@ export default function AlertsPage() {
             )}
           </section>
         </div>
-      </main>
 
       {showChannelModal && (
         <Modal title={editingChannelId ? "Edit Channel" : "Add Channel"} onClose={() => { setShowChannelModal(false); resetChannelForm(); }}>
-          <form onSubmit={handleSaveChannel} className="space-y-4">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              <Field label="Channel Type">
-                <select
-                  value={channelForm.type}
-                  onChange={(event) => setChannelForm((prev) => ({
-                    ...prev,
-                    type: event.target.value,
-                    webhookUrl: "",
-                    fromEmail: "",
-                    recipientEmails: "",
-                  }))}
-                  disabled={Boolean(editingChannelId)}
-                  className="w-full h-11 rounded-lg border border-[#252a33] bg-[#14181e] px-3 text-sm"
-                >
-                  {CHANNEL_TYPES.map((item) => (
-                    <option key={item.value} value={item.value}>{item.label}</option>
-                  ))}
-                </select>
-              </Field>
-              <Field label="Name">
-                <input
-                  value={channelForm.name}
-                  onChange={(event) => setChannelForm((prev) => ({ ...prev, name: event.target.value }))}
-                  className="w-full h-11 rounded-lg border border-[#252a33] bg-[#14181e] px-3 text-sm"
-                  placeholder="Primary Discord"
-                />
-              </Field>
+        <form onSubmit={handleSaveChannel} className="space-y-4">
+          {modalError && (
+            <div className="bg-red-500/10 border border-red-500/25 text-red-300 rounded-lg px-4 py-3 text-sm">
+              {modalError}
             </div>
+          )}
+
+          {/* Show channel type as a read-only badge, not a dropdown */}
+          <div className="flex items-center gap-3 p-3 rounded-lg bg-[#0c0e12] border border-[#1e2330]">
+            {(() => { const preset = CHANNEL_PRESETS.find(p => p.type === channelForm.type); return preset ? <><preset.Icon className="w-4 h-4 text-[#8b93a5]" /><span className="text-sm font-medium text-[#edf2fb]">{preset.label}</span><span className="text-[11px] text-[#6b7280] ml-1">channel</span></> : null; })()}
+          </div>
+
+          <Field label="Name (optional)">
+            <input
+              value={channelForm.name}
+              onChange={(event) => setChannelForm((prev) => ({ ...prev, name: event.target.value }))}
+              className="w-full h-11 rounded-lg border border-[#252a33] bg-[#14181e] px-3 text-sm"
+              placeholder={`My ${channelForm.type} channel`}
+            />
+          </Field>
 
             {channelForm.type === "email" ? (
               <div className="grid grid-cols-1 gap-3">
-                <Field label="From Email">
-                  <input
-                    value={channelForm.fromEmail}
-                    onChange={(event) => setChannelForm((prev) => ({ ...prev, fromEmail: event.target.value }))}
-                    className="w-full h-11 rounded-lg border border-[#252a33] bg-[#14181e] px-3 text-sm"
-                    placeholder="alerts@yourdomain.com"
-                  />
-                </Field>
                 <Field label="Recipient Emails">
                   <textarea
                     value={channelForm.recipientEmails}
@@ -772,6 +748,7 @@ export default function AlertsPage() {
                     className="w-full min-h-28 rounded-lg border border-[#252a33] bg-[#14181e] px-3 py-3 text-sm"
                     placeholder="ops@example.com, founder@example.com"
                   />
+                  <p className="text-[11px] text-[#6b7280] mt-1">Enter one or more emails separated by commas. Alerts will be sent from your verified domain via Resend.</p>
                 </Field>
               </div>
             ) : (
@@ -1118,9 +1095,9 @@ function NavItem(props) {
   );
 }
 
-function SummaryCard({ label, value, caption }) {
+function SummaryCard({ label, value, caption, highlight = false }) {
   return (
-    <article className="bg-[#0f1217] border border-[#22252b] rounded-xl p-3">
+    <article className={`border rounded-xl p-3 ${highlight ? "bg-[#0b1610] border-[#1a3d28]" : "bg-[#0f1217] border-[#22252b]"}`}>
       <p className="text-sm uppercase tracking-[0.09em] text-[#8d94a0]">{label}</p>
       <div className="mt-1.5 min-h-[32px] flex items-center">
         {value === "--" ? (
@@ -1129,7 +1106,7 @@ function SummaryCard({ label, value, caption }) {
             aria-label={`${label} loading`}
           />
         ) : (
-          <p className="text-2xl font-semibold text-[#edf3fb]">{value}</p>
+          <p className={`text-2xl font-semibold ${highlight ? "text-[#69e7ba]" : "text-[#edf3fb]"}`}>{value}</p>
         )}
       </div>
       <p className="text-sm text-[#7a828f] mt-0.5">{caption}</p>
@@ -1158,7 +1135,7 @@ function EmptyCard({ message, compact = false }) {
 function Modal({ title, onClose, children }) {
   return (
     <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
-      <div className="w-full max-w-4xl rounded-2xl border border-[#252a33] bg-[#0f1217] shadow-2xl max-h-[90vh] overflow-hidden">
+      <div className="w-full max-w-lg rounded-2xl border border-[#252a33] bg-[#0f1217] shadow-2xl max-h-[90vh] overflow-hidden">
         <div className="flex items-center justify-between px-5 py-4 border-b border-[#22252b]">
           <h3 className="text-lg font-semibold text-[#edf2fb]">{title}</h3>
           <button type="button" onClick={onClose} className="h-9 w-9 rounded-lg border border-[#252a33] grid place-items-center text-[#a7afbd]">

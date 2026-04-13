@@ -1,4 +1,5 @@
 import { json } from "../lib/http.js";
+import { getWorkspaceBilling, getEntitlementsForBilling } from "../services/billing.js";
 import {
   createTeamWorkspace,
   deleteWorkspace,
@@ -19,6 +20,11 @@ import {
 export async function postTeamWorkspace(request, redis, auth, workspace, membership, corsHeaders) {
   if (membership?.role !== "owner") {
     return json({ error: "Only workspace owners can create team workspaces." }, 403, corsHeaders);
+  }
+  const billing = await getWorkspaceBilling(redis, workspace);
+  const entitlements = getEntitlementsForBilling(billing);
+  if (!entitlements.canCreateTeamWorkspaces) {
+    return json({ error: "Upgrade to Pro to create team workspaces." }, 403, corsHeaders);
   }
 
   let body;

@@ -28,6 +28,7 @@ import {
   Legend,
 } from "recharts";
 import AddMonitorModal from "../../components/AddMonitorModal";
+import PageLoader from "../../components/PageLoader";
 import { useAuth } from "../../context/AuthContext";
 import {
   fetchMonitorSummary,
@@ -335,25 +336,10 @@ export default function DashboardPage() {
   }, [selectedMonitorIds, monitors]);
 
   // ── Render ─────────────────────────────────────────────────────────────────
+  // Show skeleton on cold load (both summary and first monitor batch pending)
+  if (summaryLoading && monitorsLoading) return <PageLoader rows={5} />;
   return (
-    <div className="h-screen bg-[#08090b] text-[#f2f2f2] flex overflow-hidden">
-      {/* Sidebar */}
-      <aside className="hidden md:flex w-64 h-screen sticky top-0 overflow-hidden flex-col border-r border-[#22252b] bg-[#0f1114]">
-        <div className="px-5 py-6 border-b border-[#22252b]">
-          <h1 className="text-xl font-semibold tracking-tight">PingMaster</h1>
-          <p className="text-[11px] uppercase tracking-[0.09em] text-[#8d94a0] mt-1">Web Monitor</p>
-        </div>
-        <nav className="flex-1 px-3 py-4 space-y-1">
-          <NavItem Icon={LayoutGrid} label="Dashboard" active />
-          <NavItem Icon={AlertTriangle} label="Incidents" onClick={() => navigate("/incidents")} />
-          <NavItem Icon={Siren} label="Alerts" onClick={() => navigate("/alerts")} />
-          <NavItem Icon={Globe} label="Status Page" onClick={() => navigate("/status-pages")} />
-          <NavItem Icon={Users} label="Team" onClick={() => navigate("/team")} />
-        </nav>
-      </aside>
-
-      {/* Main */}
-      <main className="flex-1 min-w-0 overflow-y-auto">
+    <div className="min-h-screen text-[#f2f2f2]">
         {/* Header */}
         <header className="h-20 sticky top-0 z-20 border-b border-[#22252b] bg-[#0d0f13] px-5 md:px-8 flex items-center justify-between gap-4 overflow-hidden">
           <div className="min-w-0">
@@ -370,31 +356,6 @@ export default function DashboardPage() {
                 className="w-full bg-transparent text-sm text-[#dbe1eb] placeholder:text-[#6f7785] px-2 focus:outline-none"
               />
             </div>
-            <button
-              type="button"
-              className="h-10 w-10 rounded-lg border border-[#252a33] bg-[#14181e] grid place-items-center text-[#a7afbd]"
-            >
-              <Bell className="w-4 h-4" />
-            </button>
-            <div className="h-10 w-10 rounded-full bg-[#f0b38e] text-[#302317] text-sm font-semibold grid place-items-center">
-              {getInitial(user?.email)}
-            </div>
-            <button
-              type="button"
-              className="h-10 px-3 rounded-lg border border-[#252a33] bg-[#14181e] text-[#d4dae4] text-sm inline-flex items-center gap-2"
-              title="Settings"
-            >
-              <Settings className="w-4 h-4" />
-              Settings
-            </button>
-            <button
-              type="button"
-              onClick={logout}
-              className="h-10 px-3 rounded-lg border border-[#252a33] bg-[#14181e] text-[#d4dae4] text-sm"
-              title="Logout"
-            >
-              Logout
-            </button>
           </div>
         </header>
 
@@ -775,8 +736,6 @@ export default function DashboardPage() {
             )}
           </section>
         </div>
-      </main>
-
       {showModal && (
         <AddMonitorModal onClose={() => setShowModal(false)} onAdd={handleAddMonitor} />
       )}
