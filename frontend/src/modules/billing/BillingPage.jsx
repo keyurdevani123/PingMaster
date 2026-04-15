@@ -85,6 +85,15 @@ export default function BillingPage() {
     setSelectedPlan((prev) => (prev === "free" ? "plus" : prev));
   }, [billingState?.isPaid, billingState?.plan, billingState?.pendingPlan, billingState?.status]);
 
+  const resetSelectionToCurrentPlan = useCallback((nextBilling) => {
+    const activePlan = getPlanCode(nextBilling?.plan);
+    if (activePlan !== "free") {
+      setSelectedPlan(activePlan);
+      return;
+    }
+    setSelectedPlan("plus");
+  }, []);
+
   async function waitForPaidBillingState(expectedPlan) {
     for (let attempt = 0; attempt < BILLING_SYNC_ATTEMPTS; attempt += 1) {
       const payload = await fetchBilling(user, { force: true });
@@ -121,8 +130,9 @@ export default function BillingPage() {
 
       const razorpay = new window.Razorpay({
         key: checkout.key,
-        subscription_id: checkout.subscriptionId,
-        recurring: true,
+        order_id: checkout.orderId,
+        amount: checkout.amount,
+        currency: checkout.currency || "INR",
         name: checkout.name,
         description: checkout.description,
         prefill: checkout.prefill,
@@ -131,8 +141,8 @@ export default function BillingPage() {
         handler: async (response) => {
           try {
             await verifyBillingSubscription(user, {
+              orderId: response?.razorpay_order_id || checkout.orderId || "",
               paymentId: response?.razorpay_payment_id || "",
-              subscriptionId: response?.razorpay_subscription_id || checkout.subscriptionId || "",
               signature: response?.razorpay_signature || "",
             });
             finishResolve(response);
@@ -163,14 +173,22 @@ export default function BillingPage() {
       const paidBilling = await waitForPaidBillingState(planToStart);
       if (!paidBilling?.isPaid || paidBilling?.plan !== planToStart) {
         if (checkoutResult?.dismissed) {
-          throw new Error("Checkout closed before PingMaster could confirm the subscription. If Razorpay shows success, refresh once and it should sync.");
+          const refreshed = await fetchBilling(user, { force: true });
+          const refreshedBilling = refreshed?.billing || null;
+          setBillingState(refreshedBilling);
+          resetSelectionToCurrentPlan(refreshedBilling);
+          throw new Error("Checkout closed before PingMaster could confirm the payment. If Razorpay shows success, refresh once and it should sync.");
         }
-        throw new Error("The subscription was received, but the new plan has not synced yet. Refresh in a moment and it should appear.");
+        throw new Error("The payment was received, but the new plan has not synced yet. Refresh in a moment and it should appear.");
       }
       await refreshSession();
       await loadBillingState({ silent: true });
       setSuccess(`${paidBilling.planLabel} is now active for your workspace.`);
     } catch (err) {
+      if (!submitting) {
+        const currentBilling = billingState || sessionBilling || null;
+        resetSelectionToCurrentPlan(currentBilling);
+      }
       setError(err?.message || "Could not complete Razorpay checkout.");
     } finally {
       setSubmitting(false);
@@ -187,16 +205,20 @@ export default function BillingPage() {
   const billing = billingState || sessionBilling || null;
   const currentPlanCode = getPlanCode(billing?.plan);
   const lockedPlanCode = getLockedPlanCode(billing);
-  const hasLockedPaidPlan = lockedPlanCode !== "free";
+  const hasLockedPaidPlan = billing?.isPaid && lockedPlanCode !== "free";
+  const hasPendingUpgrade = !billing?.isPaid && getPlanCode(billing?.pendingPlan) !== "free";
   const resolvedSelectedPlan = hasLockedPaidPlan && getPlanRank(selectedPlan) < getPlanRank(lockedPlanCode)
     ? lockedPlanCode
     : selectedPlan;
-  const displayPlanCode = hasLockedPaidPlan ? lockedPlanCode : currentPlanCode;
+  const displayPlanCode = currentPlanCode;
   const displayPlanConfig = (billing?.availablePlans || []).find((plan) => plan.code === displayPlanCode) || null;
   const displayEntitlements = displayPlanConfig?.entitlements || billing?.entitlements || {};
   const selectedPlanConfig = (billing?.availablePlans || []).find((plan) => plan.code === resolvedSelectedPlan) || null;
   const isCurrentSelectionActive = resolvedSelectedPlan !== "free" && billing?.isPaid && billing?.plan === resolvedSelectedPlan;
-  const isAttachedSelection = resolvedSelectedPlan !== "free" && resolvedSelectedPlan === lockedPlanCode && Boolean(billing?.subscriptionId);
+  const isAttachedSelection = resolvedSelectedPlan !== "free"
+    && resolvedSelectedPlan === getPlanCode(billing?.pendingPlan || billing?.plan)
+    && Boolean(billing?.subscriptionId)
+    && ["created", "authenticated", "pending"].includes(String(billing?.status || "").toLowerCase());
 
   return (
     <div className="min-h-screen bg-[#08090b] text-[#f2f2f2]">
@@ -226,9 +248,12 @@ export default function BillingPage() {
         {billing?.notice && <div className="rounded-xl border border-[#2b3442] bg-[#10141b] px-4 py-3 text-sm text-[#cfd6e3]">{billing.notice}</div>}
         {hasLockedPaidPlan ? (
           <div className="rounded-xl border border-[#2b3442] bg-[#10141b] px-4 py-3 text-sm text-[#cfd6e3]">
-            {billing?.pendingPlan && billing.pendingPlan !== billing?.plan
-              ? `${formatPlanLabel(billing.pendingPlan)} is syncing for this workspace. Lower plans stay locked until the billing state is settled.`
-              : `${formatPlanLabel(lockedPlanCode)} is attached to this workspace. Lower plans stay locked here so the UI cannot drift below your real subscription.`}
+            {`${formatPlanLabel(lockedPlanCode)} is active for this workspace. Lower plans stay locked here so the UI cannot drift below your real subscription.`}
+          </div>
+        ) : null}
+        {hasPendingUpgrade ? (
+          <div className="rounded-xl border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
+            {`${formatPlanLabel(billing?.pendingPlan)} checkout was started, but access will stay on ${formatPlanLabel(currentPlanCode)} until Razorpay confirms the payment.`}
           </div>
         ) : null}
 
@@ -309,7 +334,7 @@ export default function BillingPage() {
 
                   <div className="mt-5">
                     <p className="text-2xl font-semibold text-white">{plan.priceMonthlyLabel || "Custom"}</p>
-                    <p className="mt-1 text-xs text-[#6f7785]">Monthly recurring subscription</p>
+                    <p className="mt-1 text-xs text-[#6f7785]">One-time payment checkout</p>
                   </div>
 
                   <div className="mt-4 space-y-2.5">
@@ -358,7 +383,7 @@ export default function BillingPage() {
                 <div className="rounded-xl border border-[#252a33] bg-[#14181e] p-4 space-y-3">
                   <InfoLine icon={CheckCircle2} text="Slack, Discord, and email delivery are available across all plans." />
                   <InfoLine icon={ShieldCheck} text={selectedPlanConfig.entitlements?.canUseAiReports ? "AI insights are included in this plan." : "AI insights are not included in this plan."} />
-                  <InfoLine icon={ArrowRight} text={resolvedSelectedPlan === "free" ? "Stay on Free for core monitoring." : "Razorpay verifies the subscription before the new plan is activated."} />
+                  <InfoLine icon={ArrowRight} text={resolvedSelectedPlan === "free" ? "Stay on Free for core monitoring." : "Razorpay verifies the payment before the new plan is activated."} />
                 </div>
               </div>
             ) : null}
@@ -371,8 +396,8 @@ export default function BillingPage() {
                 {isTeamWorkspace
                   ? "Shared workspaces inherit the owner's paid plan, but they cannot be purchased directly."
                   : billing?.mode === "test"
-                    ? "This workspace is ready for Razorpay test subscriptions. Use test cards or test UPI in checkout."
-                    : "Use this page to start or change a recurring paid plan for your personal workspace."}
+                    ? "This workspace is ready for Razorpay test payments. Use cards, netbanking, wallets, or test UPI in checkout."
+                    : "Use this page to start or change a paid plan for your personal workspace."}
               </p>
             </div>
 
@@ -391,8 +416,8 @@ export default function BillingPage() {
             ) : (
               <>
                 <div className="rounded-xl border border-[#252a33] bg-[#14181e] p-4 space-y-3">
-                  <InfoLine icon={ShieldCheck} text="Subscriptions unlock only after backend signature verification." />
-                  <InfoLine icon={CheckCircle2} text="Webhook updates keep renewals and plan state in sync after the first checkout." />
+                  <InfoLine icon={ShieldCheck} text="Payments unlock only after backend signature verification." />
+                  <InfoLine icon={CheckCircle2} text="Webhook updates keep billing in sync after the first checkout." />
                   <InfoLine icon={ArrowRight} text="Plus unlocks shared workspaces. Pro raises the limits further." />
                 </div>
 
@@ -405,10 +430,12 @@ export default function BillingPage() {
                   {resolvedSelectedPlan === "free"
                     ? "Free Plan Selected"
                     : isCurrentSelectionActive || isAttachedSelection
-                      ? `${selectedPlanConfig?.label || "Plan"} Already Active`
+                      ? ["created", "authenticated", "pending"].includes(String(billing?.status || "").toLowerCase()) && billing?.pendingPlan === resolvedSelectedPlan
+                        ? `${selectedPlanConfig?.label || "Plan"} Checkout Pending`
+                        : `${selectedPlanConfig?.label || "Plan"} Already Active`
                       : submitting
-                        ? "Opening Subscription..."
-                        : `Start ${selectedPlanConfig?.label || "Selected"} Subscription`}
+                        ? "Opening Checkout..."
+                        : `Start ${selectedPlanConfig?.label || "Selected"} Checkout`}
                 </button>
 
                 {resolvedSelectedPlan === "free" ? (

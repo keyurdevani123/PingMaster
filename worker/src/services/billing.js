@@ -392,11 +392,23 @@ export async function applyRazorpaySubscriptionToWorkspace(redis, workspaceId, s
     throw new Error("Workspace billing update requires a workspace and subscription.");
   }
 
+  const current = await getWorkspaceBilling(redis, workspaceId);
+  const targetPlan = normalizePlanCode(subscription?.notes?.plan_code || options.planCode || PRO_PLAN);
+  const nextStatus = normalizeStatus(subscription?.status || options.status || "created");
+  const nextPlan = isPaidBillingStatus(nextStatus) ? targetPlan : current.plan;
+  const nextPendingPlan = isPaidBillingStatus(nextStatus)
+    ? null
+    : (
+      ["created", "authenticated", "pending"].includes(nextStatus)
+        ? targetPlan
+        : null
+    );
+
   return mergeWorkspaceBilling(redis, workspaceId, {
     provider: "razorpay",
-    plan: normalizePlanCode(subscription?.notes?.plan_code || options.planCode || PRO_PLAN),
-    pendingPlan: null,
-    status: normalizeStatus(subscription?.status || options.status || "created"),
+    plan: nextPlan,
+    pendingPlan: nextPendingPlan,
+    status: nextStatus,
     customerId: subscription?.customer_id || null,
     orderId: options.orderId || null,
     subscriptionId: subscription?.id || options.subscriptionId || null,
@@ -414,11 +426,19 @@ export async function applyRazorpayPaymentToWorkspace(redis, workspaceId, paymen
     throw new Error("Workspace billing update requires a workspace and payment.");
   }
 
+  const current = await getWorkspaceBilling(redis, workspaceId);
+  const targetPlan = normalizePlanCode(payment?.notes?.plan_code || options.planCode || current.pendingPlan || PRO_PLAN);
+  const nextStatus = normalizeStatus(options.status || (payment?.status === "captured" ? "active" : payment?.status || "created"));
+  const nextPlan = isPaidBillingStatus(nextStatus) ? targetPlan : current.plan;
+  const nextPendingPlan = isPaidBillingStatus(nextStatus)
+    ? null
+    : current.pendingPlan;
+
   return mergeWorkspaceBilling(redis, workspaceId, {
     provider: "razorpay",
-    plan: normalizePlanCode(payment?.notes?.plan_code || options.planCode || PRO_PLAN),
-    pendingPlan: null,
-    status: normalizeStatus(options.status || (payment?.status === "captured" ? "active" : payment?.status || "created")),
+    plan: nextPlan,
+    pendingPlan: nextPendingPlan,
+    status: nextStatus,
     customerId: payment?.email || payment?.contact || null,
     orderId: payment?.order_id || options.orderId || null,
     subscriptionId: payment?.subscription_id || null,
@@ -438,12 +458,22 @@ export async function syncWorkspaceBillingFromRazorpay(redis, workspace, env) {
     return billing;
   }
 
-  const hasPendingPaidState = billing.plan !== FREE_PLAN && (!isPaidBillingStatus(billing.status) || Boolean(billing.pendingPlan));
-  if (!hasPendingPaidState || !billing.subscriptionId) {
+  const hasPendingPaidState = Boolean(billing.pendingPlan) || (billing.plan !== FREE_PLAN && !isPaidBillingStatus(billing.status));
+  if (!hasPendingPaidState || (!billing.subscriptionId && !billing.paymentId)) {
     return billing;
   }
 
   try {
+    if (billing.paymentId) {
+      const payment = await fetchRazorpayPayment(env, billing.paymentId);
+      return applyRazorpayPaymentToWorkspace(redis, workspaceId, payment, {
+        orderId: billing.orderId || null,
+        paymentId: billing.paymentId || null,
+        planCode: billing.pendingPlan || billing.plan,
+        eventType: "billing.sync",
+        status: payment?.status === "captured" ? "active" : payment?.status || billing.status,
+      });
+    }
     const subscription = await fetchRazorpaySubscription(env, billing.subscriptionId);
     return applyRazorpaySubscriptionToWorkspace(redis, workspaceId, subscription, {
       paymentId: billing.paymentId || null,
