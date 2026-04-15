@@ -1,12 +1,15 @@
 import { useState } from "react";
 import { createUserWithEmailAndPassword, signInWithPopup, updateProfile } from "firebase/auth";
 import { auth, googleProvider } from "../firebase";
-import { useNavigate, useSearchParams, Link } from "react-router-dom";
+import { Navigate, useNavigate, useSearchParams, Link } from "react-router-dom";
+import PageLoader from "../components/PageLoader";
+import { useAuth } from "../context/AuthContext";
 
 export default function Signup() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const nextPath = searchParams.get("next") || "/dashboard";
+  const { user, loading: authLoading } = useAuth();
 
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
@@ -15,6 +18,14 @@ export default function Signup() {
   const [errors, setErrors] = useState({});
   const [serverError, setServerError] = useState("");
   const [loading, setLoading] = useState(false);
+
+  if (authLoading) {
+    return <PageLoader rows={3} />;
+  }
+
+  if (user) {
+    return <Navigate to={nextPath} replace />;
+  }
 
   function validate() {
     const e = {};

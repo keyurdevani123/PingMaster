@@ -2,6 +2,7 @@ const FREE_PLAN = "free";
 const PLUS_PLAN = "plus";
 const PRO_PLAN = "pro";
 const ACTIVE_BILLING_STATUSES = new Set(["authenticated", "active", "captured"]);
+const PENDING_BILLING_STATUSES = new Set(["created", "authenticated", "pending"]);
 const DEFAULT_PLUS_AMOUNT_PAISA = 24900;
 const DEFAULT_PRO_AMOUNT_PAISA = 79900;
 
@@ -120,12 +121,20 @@ function toIsoString(value) {
 }
 
 function normalizeBillingRecord(workspaceId, value = {}) {
+  const status = normalizeStatus(value?.status);
+  const plan = normalizePlanCode(value?.plan);
+  const storedLastPaidPlan = normalizePlanCode(value?.lastPaidPlan);
+  const lastPaidPlan = storedLastPaidPlan !== FREE_PLAN
+    ? storedLastPaidPlan
+    : (isPaidBillingStatus(status) ? plan : FREE_PLAN);
+
   return {
     workspaceId,
     provider: value?.provider || "razorpay",
-    plan: normalizePlanCode(value?.plan),
+    plan,
     pendingPlan: value?.pendingPlan ? normalizePlanCode(value.pendingPlan) : null,
-    status: normalizeStatus(value?.status),
+    status,
+    lastPaidPlan,
     customerId: value?.customerId || null,
     orderId: value?.orderId || null,
     subscriptionId: value?.subscriptionId || null,
@@ -156,8 +165,76 @@ export function isPaidBillingStatus(status) {
   return ACTIVE_BILLING_STATUSES.has(normalizeStatus(status));
 }
 
+export function getStableBillingPlanCode(billing) {
+  if (isPaidBillingStatus(billing?.status)) {
+    return normalizePlanCode(billing?.plan);
+  }
+
+  const lastPaidPlan = normalizePlanCode(billing?.lastPaidPlan);
+  return lastPaidPlan !== FREE_PLAN ? lastPaidPlan : FREE_PLAN;
+}
+
+function repairBillingRecordState(billing) {
+  const normalized = normalizeBillingRecord(billing?.workspaceId || "", billing || {});
+  const status = normalizeStatus(normalized.status);
+  const isPaid = isPaidBillingStatus(status);
+  const stablePlan = getStableBillingPlanCode(normalized);
+  const hasRemotePaymentReference = Boolean(normalized.paymentId || normalized.subscriptionId);
+  const patch = {};
+
+  if (isPaid) {
+    if (normalized.pendingPlan) patch.pendingPlan = null;
+    if (normalized.lastPaidPlan !== normalized.plan) patch.lastPaidPlan = normalized.plan;
+  } else if (PENDING_BILLING_STATUSES.has(status)) {
+    const requestedPlan = normalized.pendingPlan
+      || (normalizePlanCode(normalized.plan) !== stablePlan ? normalizePlanCode(normalized.plan) : null);
+
+    if (normalized.plan !== stablePlan) patch.plan = stablePlan;
+    if (requestedPlan !== normalized.pendingPlan) patch.pendingPlan = requestedPlan;
+    if (!requestedPlan && normalized.orderId) patch.orderId = null;
+  } else if (!hasRemotePaymentReference) {
+    if (normalized.plan !== stablePlan) patch.plan = stablePlan;
+    if (normalized.pendingPlan !== null) patch.pendingPlan = null;
+    if (normalized.orderId !== null) patch.orderId = null;
+    if (normalized.subscriptionId !== null) patch.subscriptionId = null;
+    if (normalized.paymentId !== null) patch.paymentId = null;
+
+    const healedStatus = stablePlan === FREE_PLAN ? "free" : "active";
+    if (normalized.status !== healedStatus) patch.status = healedStatus;
+  }
+
+  if (Object.keys(patch).length === 0) {
+    return normalized;
+  }
+
+  return normalizeBillingRecord(normalized.workspaceId, {
+    ...normalized,
+    ...patch,
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+function billingRecordsDiffer(left, right) {
+  const keys = [
+    "plan",
+    "pendingPlan",
+    "status",
+    "lastPaidPlan",
+    "orderId",
+    "subscriptionId",
+    "paymentId",
+    "customerId",
+    "currentPeriodStart",
+    "currentPeriodEnd",
+    "lastWebhookEventId",
+    "lastWebhookEventType",
+  ];
+
+  return keys.some((key) => (left?.[key] || null) !== (right?.[key] || null));
+}
+
 export function getEntitlementsForBilling(billing) {
-  const planCode = normalizePlanCode(billing?.plan);
+  const planCode = getStableBillingPlanCode(billing);
   const normalized = planCode !== FREE_PLAN && isPaidBillingStatus(billing?.status)
     ? PLAN_CONFIG[planCode]
     : PLAN_CONFIG[FREE_PLAN];
@@ -165,7 +242,8 @@ export function getEntitlementsForBilling(billing) {
 }
 
 export function buildBillingSummary(billing, options = {}) {
-  const plan = PLAN_CONFIG[normalizePlanCode(billing?.plan)];
+  const stablePlanCode = getStableBillingPlanCode(billing);
+  const plan = PLAN_CONFIG[stablePlanCode];
   const status = normalizeStatus(billing?.status);
   const isPaid = plan.code !== FREE_PLAN && isPaidBillingStatus(status);
   return {
@@ -174,6 +252,7 @@ export function buildBillingSummary(billing, options = {}) {
     planLabel: plan.label,
     pendingPlan: billing?.pendingPlan || null,
     pendingPlanLabel: billing?.pendingPlan ? getBillingPlanConfig(billing.pendingPlan).label : null,
+    lastPaidPlan: billing?.lastPaidPlan || null,
     description: plan.description,
     priceMonthlyPaise: plan.priceMonthlyPaise,
     priceMonthlyLabel: plan.priceMonthlyLabel,
@@ -203,7 +282,7 @@ export async function getWorkspaceBilling(redis, workspace) {
     return normalizeBillingRecord("", {});
   }
   const existing = await redis.get(getWorkspaceBillingKey(workspaceId));
-  return normalizeBillingRecord(workspaceId, existing || {});
+  return repairBillingRecordState(normalizeBillingRecord(workspaceId, existing || {}));
 }
 
 export async function saveWorkspaceBilling(redis, workspaceId, value) {
@@ -409,6 +488,7 @@ export async function applyRazorpaySubscriptionToWorkspace(redis, workspaceId, s
     plan: nextPlan,
     pendingPlan: nextPendingPlan,
     status: nextStatus,
+    lastPaidPlan: isPaidBillingStatus(nextStatus) ? nextPlan : current.lastPaidPlan,
     customerId: subscription?.customer_id || null,
     orderId: options.orderId || null,
     subscriptionId: subscription?.id || options.subscriptionId || null,
@@ -439,6 +519,7 @@ export async function applyRazorpayPaymentToWorkspace(redis, workspaceId, paymen
     plan: nextPlan,
     pendingPlan: nextPendingPlan,
     status: nextStatus,
+    lastPaidPlan: isPaidBillingStatus(nextStatus) ? nextPlan : current.lastPaidPlan,
     customerId: payment?.email || payment?.contact || null,
     orderId: payment?.order_id || options.orderId || null,
     subscriptionId: payment?.subscription_id || null,
@@ -454,13 +535,25 @@ export async function applyRazorpayPaymentToWorkspace(redis, workspaceId, paymen
 export async function syncWorkspaceBillingFromRazorpay(redis, workspace, env) {
   const workspaceId = resolveBillingWorkspaceId(workspace);
   const billing = await getWorkspaceBilling(redis, workspaceId);
-  if (!workspaceId || !isRazorpayConfigured(env)) {
+  if (!workspaceId) {
     return billing;
+  }
+
+  const persistRepairedBilling = async (candidate) => {
+    const repaired = repairBillingRecordState(candidate);
+    if (!billingRecordsDiffer(candidate, repaired)) {
+      return candidate;
+    }
+    return saveWorkspaceBilling(redis, workspaceId, repaired);
+  };
+
+  if (!isRazorpayConfigured(env)) {
+    return persistRepairedBilling(billing);
   }
 
   const hasPendingPaidState = Boolean(billing.pendingPlan) || (billing.plan !== FREE_PLAN && !isPaidBillingStatus(billing.status));
   if (!hasPendingPaidState || (!billing.subscriptionId && !billing.paymentId)) {
-    return billing;
+    return persistRepairedBilling(billing);
   }
 
   try {
@@ -481,6 +574,6 @@ export async function syncWorkspaceBillingFromRazorpay(redis, workspace, env) {
       eventType: "billing.sync",
     });
   } catch {
-    return billing;
+    return persistRepairedBilling(billing);
   }
 }

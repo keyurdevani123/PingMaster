@@ -7,7 +7,7 @@ import {
   ShieldCheck,
   Users,
 } from "lucide-react";
-import { useNavigate } from "react-router-dom";
+import { Navigate, useNavigate } from "react-router-dom";
 import { useAuth } from "../../context/AuthContext";
 
 const CAPABILITIES = [
@@ -47,6 +47,10 @@ const DETAILS = [
 export default function HomePage() {
   const { user, loading } = useAuth();
   const navigate = useNavigate();
+
+  if (!loading && user) {
+    return <Navigate to="/dashboard" replace />;
+  }
 
   return (
     <div className="min-h-screen bg-[#08090b] text-[#f2f2f2] overflow-x-hidden">

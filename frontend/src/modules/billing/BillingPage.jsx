@@ -185,10 +185,10 @@ export default function BillingPage() {
       await loadBillingState({ silent: true });
       setSuccess(`${paidBilling.planLabel} is now active for your workspace.`);
     } catch (err) {
-      if (!submitting) {
-        const currentBilling = billingState || sessionBilling || null;
-        resetSelectionToCurrentPlan(currentBilling);
-      }
+      const refreshed = await fetchBilling(user, { force: true }).catch(() => null);
+      const nextBilling = refreshed?.billing || billingState || sessionBilling || null;
+      setBillingState(nextBilling);
+      resetSelectionToCurrentPlan(nextBilling);
       setError(err?.message || "Could not complete Razorpay checkout.");
     } finally {
       setSubmitting(false);
@@ -217,7 +217,7 @@ export default function BillingPage() {
   const isCurrentSelectionActive = resolvedSelectedPlan !== "free" && billing?.isPaid && billing?.plan === resolvedSelectedPlan;
   const isAttachedSelection = resolvedSelectedPlan !== "free"
     && resolvedSelectedPlan === getPlanCode(billing?.pendingPlan || billing?.plan)
-    && Boolean(billing?.subscriptionId)
+    && Boolean(billing?.orderId)
     && ["created", "authenticated", "pending"].includes(String(billing?.status || "").toLowerCase());
 
   return (
