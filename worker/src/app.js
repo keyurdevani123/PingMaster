@@ -157,7 +157,7 @@ export default {
     const requestedWorkspaceId = request.headers.get("X-Workspace-Id") || "";
 
     if (path === "/session/bootstrap" && method === "GET") {
-      return json(await buildBootstrapPayload(redis, auth, requestedWorkspaceId), 200, corsHeaders);
+      return json(await buildBootstrapPayload(redis, auth, requestedWorkspaceId, env), 200, corsHeaders);
     }
 
     if (path.startsWith("/team/invites/") && path.endsWith("/accept") && method === "POST") {

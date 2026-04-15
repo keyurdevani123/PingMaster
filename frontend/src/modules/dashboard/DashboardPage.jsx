@@ -63,9 +63,10 @@ import {
 } from "./dashboardUtils";
 
 export default function DashboardPage() {
-  const { user, logout, workspace, currentMembershipRole } = useAuth();
+  const { user, workspace, currentMembershipRole, entitlements } = useAuth();
   const navigate = useNavigate();
   const isTeamWorkspace = workspace?.type === "team";
+  const canManageMonitors = currentMembershipRole !== "member";
   // Members (in another owner's workspace) see only the monitor list.
   // Charts, comparisons, slowest-services are owner-only analytics.
   const isMemberView = currentMembershipRole === "member" || isTeamWorkspace;
@@ -87,6 +88,7 @@ export default function DashboardPage() {
   const [pingingAll, setPingingAll] = useState(false);
   const [pingingMonitors, setPingingMonitors] = useState({});
   const [error, setError] = useState("");
+  const [upgradeMessage, setUpgradeMessage] = useState("");
   const [query, setQuery] = useState("");
   const [range, setRange] = useState("24h");
   const [selectedMonitorIds, setSelectedMonitorIds] = useState([]);
@@ -232,6 +234,7 @@ export default function DashboardPage() {
   async function handleAddMonitor(newMonitor) {
     try {
       const saved = await createMonitor(user, newMonitor.name, newMonitor.url);
+      setUpgradeMessage("");
       if (!monitors.some((m) => m.id === saved.id)) {
         setMonitors((prev) => [saved, ...prev]);
       }
@@ -248,6 +251,9 @@ export default function DashboardPage() {
     } catch (err) {
       const message = err?.message || "Could not add monitor. Please try again.";
       setError(message);
+      if (/upgrade|plan|monitor/i.test(message)) {
+        setUpgradeMessage(message);
+      }
       throw err;
     }
   }
@@ -334,6 +340,9 @@ export default function DashboardPage() {
     });
     return map;
   }, [selectedMonitorIds, monitors]);
+  const monitorLimit = Number.isFinite(entitlements?.maxMonitors) ? entitlements.maxMonitors : null;
+  const monitorCount = monitorSummary?.totalMonitors ?? monitors.filter((item) => item.type !== "child").length;
+  const monitorLimitReached = monitorLimit != null && monitorCount >= monitorLimit;
 
   // ── Render ─────────────────────────────────────────────────────────────────
   // Show skeleton on cold load (both summary and first monitor batch pending)
@@ -364,6 +373,22 @@ export default function DashboardPage() {
             <div className="bg-red-500/10 border border-red-500/25 text-red-300 rounded-lg p-3 text-sm">
               {error}
             </div>
+          )}
+
+          {(upgradeMessage || monitorLimitReached) && (
+            <section className="rounded-xl border border-[#2a3341] bg-[#10141b] px-4 py-4 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+              <div>
+                <p className="text-sm font-medium text-white">Monitor limit reached</p>
+                <p className="mt-1 text-sm text-[#9fb0c7]">{upgradeMessage || `Your current plan includes up to ${monitorLimit} monitors.`}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => navigate("/plans")}
+                className="h-10 px-4 rounded-lg bg-white text-black text-sm font-semibold"
+              >
+                View Plans
+              </button>
+            </section>
           )}
 
           {/* ── KPI Row — loads independently, as fast as the summary endpoint ── */}
@@ -702,10 +727,12 @@ export default function DashboardPage() {
                 </button>
                 <button
                   onClick={() => setShowModal(true)}
+                  hidden={!canManageMonitors}
+                  disabled={monitorLimitReached}
                   className="h-10 px-4 rounded-lg bg-[#d3d6dc] text-[#121417] text-sm font-semibold inline-flex items-center gap-2"
                 >
                   <Plus className="w-4 h-4" />
-                  Add Monitor
+                  {monitorLimitReached ? "Limit Reached" : "Add Monitor"}
                 </button>
               </div>
             </div>
@@ -718,7 +745,7 @@ export default function DashboardPage() {
                 ))}
               </div>
             ) : filteredMonitors.length === 0 ? (
-              <EmptyState onAdd={() => setShowModal(true)} />
+              <EmptyState onAdd={canManageMonitors ? () => setShowModal(true) : undefined} />
             ) : (
               <div className="space-y-2">
                 {filteredMonitors.map((monitor) => (

@@ -1,4 +1,6 @@
 import { json } from "../lib/http.js";
+import { getBillingPlanConfig, getEntitlementsForBilling, getWorkspaceBilling } from "../services/billing.js";
+import { countOwnedStatusPages } from "../services/planUsage.js";
 import {
   listStatusPages,
   loadStatusPage,
@@ -13,11 +15,25 @@ export async function getStatusPages(request, redis, auth, workspace, membership
 }
 
 export async function createStatusPage(request, redis, auth, workspace, membership, corsHeaders) {
+  if (!["owner", "admin"].includes(membership?.role)) {
+    return json({ error: "Only workspace owners and admins can create status pages." }, 403, corsHeaders);
+  }
+
   let body;
   try {
     body = await request.json();
   } catch {
     return json({ error: "Invalid JSON body" }, 400, corsHeaders);
+  }
+
+  const billing = await getWorkspaceBilling(redis, workspace);
+  const entitlements = getEntitlementsForBilling(billing);
+  const ownedStatusPageCount = await countOwnedStatusPages(redis, auth.userId);
+  if (Number.isFinite(entitlements.maxStatusPages) && ownedStatusPageCount >= entitlements.maxStatusPages) {
+    const currentPlan = getBillingPlanConfig(billing?.plan);
+    return json({
+      error: `Your ${currentPlan.label} plan includes up to ${entitlements.maxStatusPages} status page${entitlements.maxStatusPages === 1 ? "" : "s"}. Upgrade to publish more.`,
+    }, 403, corsHeaders);
   }
 
   const statusPage = normalizeStatusPageInput(workspace.id, auth.userId, body);
@@ -34,6 +50,10 @@ export async function createStatusPage(request, redis, auth, workspace, membersh
 }
 
 export async function updateStatusPage(request, redis, auth, workspace, membership, statusPageId, corsHeaders) {
+  if (!["owner", "admin"].includes(membership?.role)) {
+    return json({ error: "Only workspace owners and admins can update status pages." }, 403, corsHeaders);
+  }
+
   const existing = await loadStatusPage(redis, statusPageId, workspace.id);
   if (!existing) return json({ error: "Status page not found" }, 404, corsHeaders);
   if (existing.workspaceId !== workspace.id) {

@@ -9,7 +9,32 @@ import {
   getWorkspaceCollectionIds,
   getWorkspaceMembership,
   isPersonalWorkspaceId,
+  workspaceCollectionHasItem,
 } from "../services/workspaces.js";
+
+async function canAccessWorkspaceIncident(redis, incident, userId, workspaceId) {
+  if (!incident?.id) return false;
+  if (incident.userId === userId) return true;
+  return workspaceCollectionHasItem(
+    redis,
+    workspaceId,
+    "incidents",
+    incident.id,
+    isPersonalWorkspaceId(workspaceId) ? `user:${userId}:incidents` : null
+  );
+}
+
+async function canAccessWorkspaceMonitor(redis, monitor, userId, workspaceId) {
+  if (!monitor?.id) return false;
+  if (monitor.userId === userId) return true;
+  return workspaceCollectionHasItem(
+    redis,
+    workspaceId,
+    "monitors",
+    monitor.id,
+    isPersonalWorkspaceId(workspaceId) ? `user:${userId}:monitors` : null
+  );
+}
 
 export async function getIncidents(request, redis, auth, workspace, membership, corsHeaders) {
   const userId = auth.userId;
@@ -34,8 +59,7 @@ export async function getIncidents(request, redis, auth, workspace, membership, 
 
     const incident = await redis.get(`incident:${incidentId}`);
     if (!incident) continue;
-    if (incident.workspaceId && incident.workspaceId !== workspaceId) continue;
-    if (!incident.workspaceId && incident.userId !== userId) continue;
+    if (!(await canAccessWorkspaceIncident(redis, incident, userId, workspaceId))) continue;
     await ensureWorkspaceScopedRecord(redis, `incident:${incidentId}`, incident, workspaceId, "incidents");
     incidents.push(incident);
   }
@@ -48,8 +72,7 @@ export async function getIncident(request, redis, auth, workspace, membership, i
   const workspaceId = workspace.id;
   const incident = await redis.get(`incident:${incidentId}`);
   if (!incident) return json({ error: "Incident not found" }, 404, corsHeaders);
-  if (incident.workspaceId && incident.workspaceId !== workspaceId) return json({ error: "Forbidden" }, 403, corsHeaders);
-  if (!incident.workspaceId && incident.userId !== userId) return json({ error: "Forbidden" }, 403, corsHeaders);
+  if (!(await canAccessWorkspaceIncident(redis, incident, userId, workspaceId))) return json({ error: "Forbidden" }, 403, corsHeaders);
   await ensureWorkspaceScopedRecord(redis, `incident:${incidentId}`, incident, workspaceId, "incidents");
 
   return json(await hydrateIncident(redis, incident), 200, corsHeaders);
@@ -76,6 +99,9 @@ export async function createIncident(request, redis, auth, workspace, membership
   const nextSteps = typeof body?.nextSteps === "string" ? body.nextSteps.trim() : "";
   const severity = normalizeIncidentSeverity(body?.severity);
   const monitorId = typeof body?.monitorId === "string" && body.monitorId.trim() ? body.monitorId.trim() : null;
+  const assignedToUserId = typeof body?.assignedToUserId === "string" && body.assignedToUserId.trim()
+    ? body.assignedToUserId.trim()
+    : null;
 
   if (!title) return json({ error: "title is required" }, 400, corsHeaders);
   if (!monitorId) return json({ error: "monitorId is required" }, 400, corsHeaders);
@@ -83,8 +109,13 @@ export async function createIncident(request, redis, auth, workspace, membership
 
   const monitor = await redis.get(`monitor:${monitorId}`);
   if (!monitor) return json({ error: "Monitor not found" }, 404, corsHeaders);
-  if (monitor.workspaceId && monitor.workspaceId !== workspaceId) return json({ error: "Forbidden" }, 403, corsHeaders);
-  if (!monitor.workspaceId && monitor.userId !== userId) return json({ error: "Forbidden" }, 403, corsHeaders);
+  if (!(await canAccessWorkspaceMonitor(redis, monitor, userId, workspaceId))) return json({ error: "Monitor not found" }, 404, corsHeaders);
+  if (assignedToUserId) {
+    const assignedMembership = await getWorkspaceMembership(redis, workspaceId, assignedToUserId);
+    if (!assignedMembership) {
+      return json({ error: "Assigned member was not found in this workspace." }, 400, corsHeaders);
+    }
+  }
 
   const nowIso = new Date().toISOString();
   const incidentId = `inc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -112,9 +143,9 @@ export async function createIncident(request, redis, auth, workspace, membership
     acknowledgedByUserId: null,
     resolvedAt: null,
     resolvedByUserId: null,
-    assignedToUserId: null,
-    assignedAt: null,
-    assignedByUserId: null,
+    assignedToUserId,
+    assignedAt: assignedToUserId ? nowIso : null,
+    assignedByUserId: assignedToUserId ? userId : null,
     createdAt: nowIso,
     updatedAt: nowIso,
   };
@@ -133,6 +164,16 @@ export async function createIncident(request, redis, auth, workspace, membership
     actorName: auth.name || "",
     actorEmail: auth.email || "",
   });
+  if (assignedToUserId) {
+    await appendIncidentUpdate(redis, incidentId, {
+      type: "system",
+      title: "Incident assigned",
+      body: `Assigned to ${assignedToUserId}.`,
+      actorUserId: userId,
+      actorName: auth.name || "",
+      actorEmail: auth.email || "",
+    });
+  }
   await invalidateWorkspaceStatusPageCaches(redis, workspaceId);
 
   const notificationTask = notifyIncidentLifecycle(redis, incident, "incident_created", env)
@@ -148,8 +189,7 @@ export async function updateIncident(request, redis, auth, workspace, membership
   const workspaceId = workspace.id;
   const incident = await redis.get(`incident:${incidentId}`);
   if (!incident) return json({ error: "Incident not found" }, 404, corsHeaders);
-  if (incident.workspaceId && incident.workspaceId !== workspaceId) return json({ error: "Forbidden" }, 403, corsHeaders);
-  if (!incident.workspaceId && incident.userId !== userId) return json({ error: "Forbidden" }, 403, corsHeaders);
+  if (!(await canAccessWorkspaceIncident(redis, incident, userId, workspaceId))) return json({ error: "Forbidden" }, 403, corsHeaders);
   await ensureWorkspaceScopedRecord(redis, `incident:${incidentId}`, incident, workspaceId, "incidents");
 
   let body;
@@ -196,6 +236,7 @@ export async function updateIncident(request, redis, auth, workspace, membership
       }
     }
 
+    const previousAssignedToUserId = incident.assignedToUserId || null;
     incident.title = nextTitle;
     incident.description = nextDescription;
     incident.rootCause = nextRootCause;
@@ -215,6 +256,18 @@ export async function updateIncident(request, redis, auth, workspace, membership
       actorName: auth.name || "",
       actorEmail: auth.email || "",
     });
+    if (nextAssignedToUserId !== previousAssignedToUserId) {
+      updateEvents.push({
+        type: "system",
+        title: nextAssignedToUserId ? "Incident assigned" : "Incident unassigned",
+        body: nextAssignedToUserId
+          ? `Assigned to ${nextAssignedToUserId}.`
+          : "This incident is no longer assigned to a workspace member.",
+        actorUserId: userId,
+        actorName: auth.name || "",
+        actorEmail: auth.email || "",
+      });
+    }
   }
 
   if (action === "acknowledge") {
@@ -288,8 +341,7 @@ export async function addIncidentUpdate(request, redis, auth, workspace, members
   const workspaceId = workspace.id;
   const incident = await redis.get(`incident:${incidentId}`);
   if (!incident) return json({ error: "Incident not found" }, 404, corsHeaders);
-  if (incident.workspaceId && incident.workspaceId !== workspaceId) return json({ error: "Forbidden" }, 403, corsHeaders);
-  if (!incident.workspaceId && incident.userId !== userId) return json({ error: "Forbidden" }, 403, corsHeaders);
+  if (!(await canAccessWorkspaceIncident(redis, incident, userId, workspaceId))) return json({ error: "Forbidden" }, 403, corsHeaders);
   await ensureWorkspaceScopedRecord(redis, `incident:${incidentId}`, incident, workspaceId, "incidents");
 
   let body;

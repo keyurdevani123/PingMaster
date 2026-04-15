@@ -2,12 +2,10 @@
 import PageLoader from "../components/PageLoader";
 import {
   AlertTriangle,
-  Bell,
   ChevronRight,
   Globe,
   LayoutGrid,
   RefreshCw,
-  Settings,
   Siren,
   Users,
   X,
@@ -71,7 +69,7 @@ export default function IncidentDetails() {
   const [incidentForm, setIncidentForm] = useState(INCIDENT_FORM_DEFAULTS);
   const [resolutionForm, setResolutionForm] = useState(RESOLUTION_FORM_DEFAULTS);
   const [updateForm, setUpdateForm] = useState(UPDATE_FORM_DEFAULTS);
-  const isOwner = currentMembershipRole === "owner";
+  const canManageIncidents = ["owner", "admin"].includes(currentMembershipRole);
 
   const loadIncident = useCallback(async ({ silent = false } = {}) => {
     if (!user || !workspace?.id || !incidentId) return;
@@ -123,7 +121,7 @@ export default function IncidentDetails() {
   }
 
   function openResolveModal() {
-    if (!isOwner) return;
+    if (!canManageIncidents) return;
     if (!normalizedIncident) return;
     setResolutionForm({
       fixSummary: normalizedIncident.fixSummary || "",
@@ -245,7 +243,6 @@ export default function IncidentDetails() {
 
   return (
     <div className="min-h-screen text-[#f2f2f2]">
-<main className="flex-1 min-w-0 overflow-hidden">
         <header className="sticky top-0 z-20 border-b border-[#22252b] bg-[#0d0f13] px-5 md:px-8 py-3 flex items-center justify-between gap-4">
           <div className="min-w-0">
             <p className="text-[11px] uppercase tracking-[0.08em] text-[#8d94a0]">Incident Workspace</p>
@@ -270,20 +267,13 @@ export default function IncidentDetails() {
               <RefreshCw className={`w-4 h-4 ${refreshing ? "animate-spin" : ""}`} />
               {refreshing ? "Refreshing..." : "Refresh"}
             </button>
-            <button type="button" className="h-10 w-10 rounded-lg border border-[#252a33] bg-[#14181e] grid place-items-center text-[#a7afbd]">
-              <Bell className="w-4 h-4" />
-            </button>
-            <button type="button" className="h-10 px-3 rounded-lg border border-[#252a33] bg-[#14181e] text-[#d4dae4] text-sm inline-flex items-center gap-2">
-              <Settings className="w-4 h-4" />
-              Settings
-            </button>
             <button type="button" onClick={logout} className="h-10 px-3 rounded-lg border border-[#252a33] bg-[#14181e] text-[#d4dae4] text-sm">
               Logout
             </button>
           </div>
         </header>
 
-        <main className="px-4 md:px-5 py-4 h-[calc(100vh-73px)] flex flex-col gap-4">
+        <main className="px-4 md:px-5 py-4 lg:h-[calc(100vh-73px)] min-h-[calc(100dvh-73px)] flex flex-col gap-4">
           {error && <div className="bg-red-500/10 border border-red-500/30 text-red-300 rounded-lg p-3 text-sm shrink-0">{error}</div>}
 
           <div className={`grid grid-cols-1 xl:grid-cols-2 gap-4 min-h-0 flex-1 transition-opacity duration-200 ${refreshing ? "opacity-90" : "opacity-100"}`}>
@@ -331,7 +321,7 @@ export default function IncidentDetails() {
                       Edit
                     </button>
                   )}
-                  {normalizedIncident.status !== "resolved" && isOwner ? (
+                  {normalizedIncident.status !== "resolved" && canManageIncidents ? (
                     <button
                       type="button"
                       onClick={openResolveModal}
@@ -341,7 +331,7 @@ export default function IncidentDetails() {
                       Resolve
                     </button>
                   ) : null}
-                  {normalizedIncident.status === "resolved" && isOwner ? (
+                  {normalizedIncident.status === "resolved" && canManageIncidents ? (
                     <button
                       type="button"
                       onClick={() => handleIncidentAction("reopen")}
@@ -365,9 +355,22 @@ export default function IncidentDetails() {
               <div className="px-5 md:px-6 py-5 space-y-6">
                 <div className="grid grid-cols-2 gap-x-6 gap-y-5">
                   <InfoPanel label="Opened" value={formatTimestamp(normalizedIncident.startedAt)} />
-                  <InfoPanel label="Acknowledged" value={formatTimestamp(normalizedIncident.acknowledgedAt)} />
-                  <InfoPanel label="Resolved" value={formatTimestamp(normalizedIncident.resolvedAt)} />
+                  <InfoPanel
+                    label="Acknowledgement"
+                    value={normalizedIncident.acknowledgedAt ? formatTimestamp(normalizedIncident.acknowledgedAt) : "Not acknowledged yet"}
+                    caption={normalizedIncident.acknowledgedAt ? "First acknowledged response time" : "No one has acknowledged this incident yet"}
+                  />
+                  <InfoPanel
+                    label="Resolution"
+                    value={normalizedIncident.resolvedAt ? formatTimestamp(normalizedIncident.resolvedAt) : "Not resolved yet"}
+                    caption={normalizedIncident.resolvedAt ? "Incident resolution time" : "This incident is still active"}
+                  />
                   <InfoPanel label="Duration" value={normalizedIncident.durationLabel} />
+                  <InfoPanel label="Assigned To" value={formatAssignedLabel(normalizedIncident.assignedToUserId)} />
+                  <InfoPanel
+                    label="Assigned At"
+                    value={normalizedIncident.assignedAt ? formatTimestamp(normalizedIncident.assignedAt) : "Not assigned"}
+                  />
                 </div>
 
                 <DetailBlock title="Customer Impact" value={normalizedIncident.impactSummary} emptyText="No impact summary added yet." />
@@ -452,7 +455,6 @@ export default function IncidentDetails() {
           }}
         />
       )}
-      </main>
     </div>
   );
 }
@@ -529,22 +531,23 @@ function IncidentFormModal({ title, description, form, submitting, submitLabel, 
 function ResolveIncidentModal({ user, incident, form, submitting, onChange, onClose, onSubmit }) {
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState("");
-  const [aiSuggestion, setAiSuggestion] = useState(null);
+  const [aiStatus, setAiStatus] = useState("");
 
   async function handleSuggest() {
     if (!user || !incident?.id) return;
     setAiLoading(true);
     setAiError("");
+    setAiStatus("");
     try {
       const payload = await generateIncidentResolveSuggestions(user, incident.id);
       const suggestions = payload?.suggestions || null;
-      setAiSuggestion(payload || null);
       if (suggestions) {
         onChange((prev) => ({
           ...prev,
           fixSummary: suggestions.fixSummary && suggestions.fixSummary !== "--" ? suggestions.fixSummary : prev.fixSummary,
           resolutionNotes: suggestions.resolutionNotes && suggestions.resolutionNotes !== "--" ? suggestions.resolutionNotes : prev.resolutionNotes,
         }));
+        setAiStatus("Closure fields filled from Gemini.");
       }
     } catch (err) {
       setAiError(err?.message || "Could not generate resolve suggestions.");
@@ -556,34 +559,15 @@ function ResolveIncidentModal({ user, incident, form, submitting, onChange, onCl
   return (
     <ModalShell title={`Resolve ${incident.incidentCode}`} description="Add the final fix summary before closing the incident." onClose={onClose} sizeClassName="max-w-2xl">
       <form onSubmit={onSubmit} className="space-y-4">
-        <SuggestionPanel
-          eyebrow="Resolve Suggestion"
-          title="Timeline-aware resolve draft"
-          description="Use Gemini to draft the closure fields from the recent response timeline and the latest monitor status."
-        >
-          <div className="flex flex-wrap items-center gap-3">
-            <button
-              type="button"
-              onClick={handleSuggest}
-              disabled={aiLoading}
-              className="h-9 px-4 rounded-lg border border-[#2a2f39] bg-[#161b22] text-sm text-[#d4dae4] disabled:opacity-50"
-            >
-              {aiLoading ? "Suggesting..." : aiSuggestion ? "Suggest Again" : "Suggest With AI"}
-            </button>
-            {aiSuggestion?.generatedAt ? (
-              <p className="text-xs text-[#7f8793]">Generated {formatTimestamp(aiSuggestion.generatedAt)}</p>
-            ) : null}
-          </div>
-          {aiError ? <p className="text-sm text-[#f0a496]">{aiError}</p> : null}
-          {aiSuggestion?.suggestions ? (
-            <>
-              <SuggestionRow label="Suggested fix summary" value={aiSuggestion.suggestions.fixSummary} />
-              <SuggestionRow label="Suggested resolution notes" value={aiSuggestion.suggestions.resolutionNotes} />
-            </>
-          ) : (
-            <p className="text-sm text-[#8d94a0]">Run Suggest With AI to autofill the closure fields from your incident timeline and latest monitor state.</p>
-          )}
-        </SuggestionPanel>
+        <AiAssistBar
+          label="Gemini Assist"
+          description="Fill the closure fields from the latest incident timeline and monitor state without adding extra suggestion blocks to the page."
+          actionLabel={aiLoading ? "Filling..." : "Autofill With Gemini"}
+          loading={aiLoading}
+          error={aiError}
+          status={aiStatus}
+          onClick={handleSuggest}
+        />
         <FormField label="How Was It Fixed?">
           <textarea
             value={form.fixSummary}
@@ -671,38 +655,30 @@ function ModalShell({ title, description, children, onClose, sizeClassName = "ma
   );
 }
 
-function SuggestionPanel({ eyebrow, title, description, children }) {
+function AiAssistBar({ label, description, actionLabel, loading, error, status, onClick }) {
   return (
-    <section className="rounded-xl border border-[#252a33] bg-[#11161d] p-4 space-y-3">
-      <div>
-        <p className="text-[11px] uppercase tracking-[0.08em] text-[#8d94a0]">{eyebrow}</p>
-        <h4 className="text-sm font-medium text-[#edf2fb] mt-1">{title}</h4>
-        <p className="text-xs leading-5 text-[#8d94a0] mt-1">{description}</p>
-      </div>
-      <div className="space-y-3">{children}</div>
-    </section>
-  );
-}
-
-function SuggestionRow({ label, value, actionLabel, onAction }) {
-  return (
-    <div className="rounded-lg border border-[#252a33] bg-[#0d1118] px-3 py-3">
-      <div className="flex items-start justify-between gap-3">
+    <section className="rounded-xl border border-[#252a33] bg-[#11161d] p-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="min-w-0">
           <p className="text-[11px] uppercase tracking-[0.08em] text-[#8d94a0]">{label}</p>
-          <p className="text-sm leading-6 text-[#dbe2ee] mt-1 whitespace-pre-wrap">{value || "--"}</p>
+          <p className="text-sm text-[#dbe2ee] mt-1">{description}</p>
         </div>
-        {onAction && actionLabel ? (
-          <button
-            type="button"
-            onClick={onAction}
-            className="h-8 shrink-0 px-3 rounded-lg border border-[#2a2f39] bg-[#161b22] text-xs text-[#d4dae4]"
-          >
-            {actionLabel}
-          </button>
-        ) : null}
+        <button
+          type="button"
+          onClick={onClick}
+          disabled={loading}
+          className="h-9 px-4 rounded-lg border border-[#2a2f39] bg-[#161b22] text-sm text-[#d4dae4] disabled:opacity-50"
+        >
+          {actionLabel}
+        </button>
       </div>
-    </div>
+      {status || error ? (
+        <div className="mt-3 flex flex-wrap items-center gap-3 text-sm">
+          {status ? <span className="text-[#8fe4be]">{status}</span> : null}
+          {error ? <span className="text-[#f0a496]">{error}</span> : null}
+        </div>
+      ) : null}
+    </section>
   );
 }
 
@@ -735,6 +711,7 @@ function InfoPanel({ label, value }) {
 
 function TimelineEntry({ entry, isLast }) {
   const isSystem = entry.type === "system";
+  const actorLabel = formatTimelineActorLabel(entry.actorName || entry.actorEmail || entry.actorUserId || "");
   return (
     <div className="relative pl-8">
       {!isLast && <div className="absolute left-[11px] top-7 h-[calc(100%-1rem)] w-px bg-[#2d3340]" />}
@@ -747,6 +724,9 @@ function TimelineEntry({ entry, isLast }) {
               <span className={`text-[11px] uppercase tracking-[0.08em] px-2 py-1 rounded ${isSystem ? "bg-[#1d2847] text-[#bbccff]" : "bg-[#123528] text-[#98f0c7]"}`}>
                 {isSystem ? "System update" : "Team response"}
               </span>
+              <span className="text-xs text-[#8d94a0]">
+                by {actorLabel}
+              </span>
             </div>
           </div>
           <div className="text-xs text-[#8d94a0] rounded-full border border-[#2a313d] bg-[#0d1118] px-2.5 py-1">
@@ -757,6 +737,18 @@ function TimelineEntry({ entry, isLast }) {
       </div>
     </div>
   );
+}
+
+function formatTimelineActorLabel(value) {
+  const text = String(value || "").trim();
+  if (!text) return "System";
+  return text;
+}
+
+function formatAssignedLabel(value) {
+  const text = String(value || "").trim();
+  if (!text) return "Unassigned";
+  return text;
 }
 
 function NavItem(props) {

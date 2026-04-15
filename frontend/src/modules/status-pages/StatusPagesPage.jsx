@@ -1,5 +1,5 @@
 ﻿import { Globe, LayoutGrid, AlertTriangle, Siren, Users, Plus, RefreshCw, Copy, ExternalLink, ChevronDown, X } from "lucide-react";
-import { createElement, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createElement, useCallback, useEffect, useMemo, useState } from "react";
 import PageLoader from "../../components/PageLoader";
 import { useNavigate } from "react-router-dom";
 import { createStatusPage, fetchMonitors, fetchStatusPages, updateStatusPage } from "../../api";
@@ -13,10 +13,9 @@ const FORM_DEFAULTS = {
   selectedMonitorIds: [],
   isPublic: true,
 };
-const DEFERRED_STATUS_MONITOR_LOAD_MS = 1100;
 
 export default function StatusPagesPage() {
-  const { user, logout, workspace } = useAuth();
+  const { user, workspace, entitlements } = useAuth();
   const navigate = useNavigate();
 
   const [monitors, setMonitors] = useState([]);
@@ -28,17 +27,10 @@ export default function StatusPagesPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const [upgradeMessage, setUpgradeMessage] = useState("");
   const [monitorsLoading, setMonitorsLoading] = useState(false);
   const [monitorPickerOpen, setMonitorPickerOpen] = useState(false);
   const [monitorSearch, setMonitorSearch] = useState("");
-  const deferredLoadRef = useRef(null);
-
-  const clearDeferredMonitorLoad = useCallback(() => {
-    if (deferredLoadRef.current) {
-      clearTimeout(deferredLoadRef.current);
-      deferredLoadRef.current = null;
-    }
-  }, []);
 
   const loadMonitorsSection = useCallback(async () => {
     if (!user) return;
@@ -53,13 +45,6 @@ export default function StatusPagesPage() {
     }
   }, [user]);
 
-  const scheduleMonitorLoad = useCallback(() => {
-    clearDeferredMonitorLoad();
-    deferredLoadRef.current = setTimeout(() => {
-      loadMonitorsSection();
-    }, DEFERRED_STATUS_MONITOR_LOAD_MS);
-  }, [clearDeferredMonitorLoad, loadMonitorsSection]);
-
   const loadPage = useCallback(async ({ silent = false } = {}) => {
     if (!user) return;
     if (!workspace?.id) {
@@ -68,7 +53,6 @@ export default function StatusPagesPage() {
       setError("Workspace context is unavailable right now.");
       return;
     }
-    clearDeferredMonitorLoad();
     if (silent) setRefreshing(true);
     else setLoading(true);
     setError("");
@@ -76,21 +60,17 @@ export default function StatusPagesPage() {
     try {
       const statusItems = await fetchStatusPages(user, workspace.id);
       setStatusPages(Array.isArray(statusItems) ? statusItems : []);
-      scheduleMonitorLoad();
     } catch (err) {
       setError(err?.message || "Could not load status pages.");
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [clearDeferredMonitorLoad, scheduleMonitorLoad, user, workspace?.id]);
+  }, [user, workspace?.id]);
 
   useEffect(() => {
     loadPage();
-    return () => {
-      clearDeferredMonitorLoad();
-    };
-  }, [loadPage, clearDeferredMonitorLoad]);
+  }, [loadPage]);
 
   async function ensureMonitorsLoaded() {
     if (monitors.length > 0 || monitorsLoading) return;
@@ -166,13 +146,21 @@ export default function StatusPagesPage() {
         savedPage = await createStatusPage(user, workspace.id, form);
         setStatusPages((prev) => [savedPage, ...prev]);
       }
+      setUpgradeMessage("");
       resetForm();
     } catch (err) {
-      setError(err?.message || "Could not save status page.");
+      const message = err?.message || "Could not save status page.";
+      setError(message);
+      if (/upgrade|plan|status page/i.test(message)) {
+        setUpgradeMessage(message);
+      }
     } finally {
       setSubmitting(false);
     }
   }
+
+  const statusPageLimit = Number.isFinite(entitlements?.maxStatusPages) ? entitlements.maxStatusPages : null;
+  const statusPageLimitReached = !editingId && statusPageLimit != null && statusPages.length >= statusPageLimit;
 
   if (loading) {
     return (
@@ -220,6 +208,22 @@ export default function StatusPagesPage() {
             <div className="bg-red-500/10 border border-red-500/25 text-red-300 rounded-lg p-3 text-sm">
               {error}
             </div>
+          )}
+
+          {(upgradeMessage || statusPageLimitReached) && (
+            <section className="rounded-xl border border-[#2a3341] bg-[#10141b] px-4 py-4 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+              <div>
+                <p className="text-sm font-medium text-white">Status page limit reached</p>
+                <p className="mt-1 text-sm text-[#9fb0c7]">{upgradeMessage || `Your current plan includes up to ${statusPageLimit} status pages.`}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => navigate("/plans")}
+                className="h-10 px-4 rounded-lg bg-white text-black text-sm font-semibold"
+              >
+                View Plans
+              </button>
+            </section>
           )}
 
           <section className="grid grid-cols-2 xl:grid-cols-4 gap-3">
@@ -384,10 +388,10 @@ export default function StatusPagesPage() {
                 </button>
                 <button
                   type="submit"
-                  disabled={submitting}
+                  disabled={submitting || statusPageLimitReached}
                   className="h-10 px-4 rounded-lg bg-[#d3d6dc] text-[#121417] text-sm font-semibold disabled:opacity-50"
                 >
-                  {submitting ? "Saving..." : editingId ? "Save Changes" : "Create Status Page"}
+                  {submitting ? "Saving..." : editingId ? "Save Changes" : statusPageLimitReached ? "Limit Reached" : "Create Status Page"}
                 </button>
               </div>
             </form>
@@ -421,6 +425,14 @@ export default function StatusPagesPage() {
                         <div className="grid grid-cols-2 gap-3 text-sm">
                           <MiniStat label="Visible monitors" value={String(page.selectedMonitorIds?.length || 0)} />
                           <MiniStat label="Updated" value={formatTimestamp(page.updatedAt)} />
+                          <MiniStat
+                            label="Incidents"
+                            value={String((page.activeIncidentCount || 0) + (page.recentResolvedIncidentCount || 0))}
+                          />
+                          <MiniStat
+                            label="Maintenance"
+                            value={String((page.activeMaintenanceCount || 0) + (page.upcomingMaintenanceCount || 0))}
+                          />
                         </div>
                         <div className="rounded-lg border border-[#252a33] bg-[#0f1319] px-3 py-2 text-xs text-[#9ba6b6] break-all">
                           {publicUrl}

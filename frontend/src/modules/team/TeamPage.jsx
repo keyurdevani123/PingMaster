@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Check, ChevronDown, Crown, Info, Mail, Plus, RefreshCw, Shield, Trash2, Users, X } from "lucide-react";
-import { Link, useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import PageLoader from "../../components/PageLoader";
 import { useAuth } from "../../context/AuthContext";
 import {
@@ -32,11 +32,12 @@ const ROLE_GUIDE = [
 
 export default function WorkspacesPage() {
   const { user, workspace, workspaces, currentMembershipRole, selectWorkspace, workspaceSwitching, billing } = useAuth();
+  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const inviteId = searchParams.get("invite") || "";
   const [members, setMembers] = useState([]);
   const [invites, setInvites] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [accepting, setAccepting] = useState(false);
@@ -58,7 +59,15 @@ export default function WorkspacesPage() {
   const isTeamWorkspace = workspace?.type === "team";
   const effectiveBilling = workspaceBilling || billing || null;
   const hasTeamWorkspaceAccess = Boolean(effectiveBilling?.entitlements?.canCreateTeamWorkspaces);
-  const canCreateTeamWorkspace = isOwner && !isTeamWorkspace && hasTeamWorkspaceAccess;
+  const workspaceLimit = Number.isFinite(effectiveBilling?.entitlements?.maxTeamWorkspaces)
+    ? effectiveBilling.entitlements.maxTeamWorkspaces
+    : 0;
+  const ownedTeamWorkspaceCount = useMemo(
+    () => workspaces.filter((item) => item.type === "team" && item.ownerUserId === user?.uid).length,
+    [user?.uid, workspaces],
+  );
+  const teamWorkspaceLimitReached = workspaceLimit > 0 && ownedTeamWorkspaceCount >= workspaceLimit;
+  const canCreateTeamWorkspace = isOwner && !isTeamWorkspace && hasTeamWorkspaceAccess && !teamWorkspaceLimitReached;
   const canInvite = isOwner && isTeamWorkspace;
   const canDelete = isOwner && isTeamWorkspace && (workspace?.memberCount ?? 2) <= 1;
   const activeInvites = useMemo(() => invites.filter((invite) => invite.status === "pending"), [invites]);
@@ -320,6 +329,26 @@ export default function WorkspacesPage() {
           {error && <div className="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">{error}</div>}
           {success && <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-200">{success}</div>}
 
+          {!isTeamWorkspace && isOwner && !canCreateTeamWorkspace && (
+            <section className="rounded-xl border border-[#2a3341] bg-[#10141b] px-4 py-4 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+              <div>
+                <p className="text-sm font-medium text-white">Shared workspaces are not included in this plan</p>
+                <p className="mt-1 text-sm text-[#9fb0c7]">
+                  {workspaceLimit > 0
+                    ? `Your current plan supports up to ${workspaceLimit} shared workspaces. You are currently using ${ownedTeamWorkspaceCount}.`
+                    : "Upgrade to Plus or Pro to create team workspaces for shared monitoring."}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => navigate("/plans")}
+                className="h-10 px-4 rounded-lg bg-white text-black text-sm font-semibold"
+              >
+                View Plans
+              </button>
+            </section>
+          )}
+
           <section className="bg-[#0f1217] border border-[#22252b] rounded-xl p-5 space-y-5">
             <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
               <div>
@@ -426,31 +455,6 @@ export default function WorkspacesPage() {
             </div>
           </section>
 
-          {canCreateTeamWorkspace && (
-            <section className="bg-[#0f1217] border border-[#22252b] rounded-xl p-5 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
-              <div>
-                <h2 className="text-lg font-semibold text-white">Need to share monitors with a team?</h2>
-                <p className="mt-2 text-sm text-[#8d94a0]">Create a separate team workspace instead of turning your personal workspace into a shared one.</p>
-              </div>
-              <button type="button" onClick={openWorkspaceCreator} className="h-10 px-4 rounded-lg bg-white text-black text-sm font-semibold inline-flex items-center gap-2">
-                <Plus className="w-4 h-4" />
-                Create Team Workspace
-              </button>
-            </section>
-          )}
-
-          {isOwner && !isTeamWorkspace && !hasTeamWorkspaceAccess && (
-            <section className="bg-[#0f1217] border border-[#22252b] rounded-xl p-5 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
-              <div>
-                <h2 className="text-lg font-semibold text-white">Unlock team workspaces</h2>
-                <p className="mt-2 text-sm text-[#8d94a0]">Upgrade this workspace in Billing to create shared workspaces and invite teammates.</p>
-              </div>
-              <Link to="/billing" className="h-10 px-4 rounded-lg bg-white text-black text-sm font-semibold inline-flex items-center gap-2">
-                Open Billing
-              </Link>
-            </section>
-          )}
-
           {isTeamWorkspace ? (
             <div className="grid grid-cols-1 xl:grid-cols-[1.2fr_0.8fr] gap-6">
               <section className="bg-[#0f1217] border border-[#22252b] rounded-xl overflow-hidden">
@@ -459,7 +463,9 @@ export default function WorkspacesPage() {
                   <p className="mt-1 text-sm text-[#8d94a0]">Members are shown only in shared workspaces.</p>
                 </div>
                 <div className="divide-y divide-[#22252b]">
-                  {members.map((member) => (
+                  {loading ? (
+                    <div className="px-5 py-8 text-sm text-[#8d94a0]">Loading workspace members...</div>
+                  ) : members.map((member) => (
                     <div key={`${member.workspaceId}:${member.userId}`} className="px-5 py-4 flex items-center gap-4">
                       <div className="h-9 w-9 rounded-full bg-[#14181e] border border-[#252a33] grid place-items-center text-sm font-semibold text-[#c9d1dd] shrink-0">
                         {(member.email || member.userId || "?").charAt(0).toUpperCase()}
@@ -510,7 +516,9 @@ export default function WorkspacesPage() {
                 <section className="bg-[#0f1217] border border-[#22252b] rounded-xl p-5">
                   <h2 className="text-lg font-semibold text-white">Pending Invites</h2>
                   <div className="mt-4 space-y-3">
-                    {activeInvites.length > 0 ? activeInvites.map((invite) => (
+                    {loading ? (
+                      <div className="rounded-lg border border-[#252a33] bg-[#14181e] px-4 py-4 text-sm text-[#8d94a0]">Loading invites...</div>
+                    ) : activeInvites.length > 0 ? activeInvites.map((invite) => (
                       <div key={invite.id} className="rounded-lg border border-[#252a33] bg-[#14181e] px-4 py-3 flex items-start justify-between gap-3">
                         <div className="min-w-0">
                           <p className="text-sm font-medium text-[#edf2fb] break-all">{invite.email}</p>
@@ -525,12 +533,7 @@ export default function WorkspacesPage() {
                 </section>
               </div>
             </div>
-          ) : (
-            <section className="bg-[#0f1217] border border-[#22252b] rounded-xl p-5">
-              <h2 className="text-lg font-semibold text-white">Personal workspace note</h2>
-              <p className="mt-2 text-sm text-[#8d94a0]">Personal workspaces do not show an empty members section. If you want to collaborate, create a separate team workspace and keep the personal one private.</p>
-            </section>
-          )}
+          ) : null}
         </div>
 
       </div>

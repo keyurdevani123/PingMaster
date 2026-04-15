@@ -1,7 +1,7 @@
 import {
   buildBillingSummary,
   getFeatureFlags,
-  getWorkspaceBilling,
+  syncWorkspaceBillingFromRazorpay,
 } from "./billing.js";
 
 const PERSONAL_WORKSPACE_PREFIX = "ws_";
@@ -334,6 +334,12 @@ export async function getWorkspaceCollectionIds(redis, workspaceId, collection, 
   return [...normalizedWorkspaceIds, ...missingFallbackIds];
 }
 
+export async function workspaceCollectionHasItem(redis, workspaceId, collection, itemId, fallbackKey = null) {
+  if (!workspaceId || !collection || !itemId) return false;
+  const ids = await getWorkspaceCollectionIds(redis, workspaceId, collection, fallbackKey, -1);
+  return Array.isArray(ids) ? ids.includes(itemId) : false;
+}
+
 export async function resolveWorkspaceForUser(redis, userId, requestedWorkspaceId = "", userEmail = "") {
   const defaultWorkspace = await ensureDefaultWorkspace(redis, userId, userEmail);
   const targetId = typeof requestedWorkspaceId === "string" && requestedWorkspaceId.trim()
@@ -373,7 +379,7 @@ export async function listWorkspaceMembers(redis, workspaceId) {
   return members;
 }
 
-export async function buildBootstrapPayload(redis, auth, requestedWorkspaceId = "") {
+export async function buildBootstrapPayload(redis, auth, requestedWorkspaceId = "", env = null) {
   const userId = auth?.userId || auth;
   const userEmail = typeof auth?.email === "string" ? auth.email : "";
   const defaultWorkspace = await ensureDefaultWorkspace(redis, userId, userEmail);
@@ -384,7 +390,7 @@ export async function buildBootstrapPayload(redis, auth, requestedWorkspaceId = 
       email: userEmail,
     });
   const workspaces = await listUserWorkspaces(redis, userId);
-  const billing = await getWorkspaceBilling(redis, currentWorkspace);
+  const billing = await syncWorkspaceBillingFromRazorpay(redis, currentWorkspace, env);
   const billingSummary = buildBillingSummary(billing);
   return {
     userId,
@@ -428,7 +434,7 @@ async function linkWorkspaceResources(redis, input) {
     if (!monitor) {
       return { ok: false, error: "One or more selected monitors could not be found." };
     }
-    if (monitor.userId !== ownerUserId) {
+    if (monitor.userId && monitor.userId !== ownerUserId) {
       return { ok: false, error: "Only monitors owned by you can be shared into a team workspace." };
     }
     if (monitor.type === "child") {

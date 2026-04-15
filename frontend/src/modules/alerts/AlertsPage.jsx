@@ -21,7 +21,9 @@ import {
   fetchAlertChannels,
   fetchAlertEvents,
   fetchAlertPolicies,
+  fetchAlertPreferences,
   fetchMonitors,
+  saveAlertPreferences,
   saveDefaultAlertPolicy,
   saveMonitorAlertPolicy,
   testAlertChannel,
@@ -73,16 +75,18 @@ const DEFERRED_MONITOR_LOAD_MS = 450;
 export default function AlertsPage() {
   const { user, logout, currentMembershipRole, workspace } = useAuth();
   const navigate = useNavigate();
-  const isOwner = currentMembershipRole === "owner";
+  const canManageWorkspaceAlerts = ["owner", "admin"].includes(currentMembershipRole);
 
   const [monitors, setMonitors] = useState([]);
   const [channels, setChannels] = useState([]);
   const [defaultPolicy, setDefaultPolicy] = useState(POLICY_FORM_DEFAULTS);
   const [monitorPolicies, setMonitorPolicies] = useState([]);
+  const [preferences, setPreferences] = useState(() => normalizePreferencesForForm(null));
   const [events, setEvents] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [savingPreferences, setSavingPreferences] = useState(false);
   const [testingChannelId, setTestingChannelId] = useState("");
   const [error, setError] = useState("");
 
@@ -160,9 +164,10 @@ export default function AlertsPage() {
       // Load channels, policies AND events in parallel.
       // Events need to land fast so 'Failed Deliveries' KPI resolves immediately.
       // Monitors are deferred — they're only needed when the user edits a policy.
-      const [channelItems, policySnapshot, eventItems] = await Promise.all([
+      const [channelItems, policySnapshot, preferenceSnapshot, eventItems] = await Promise.all([
         fetchAlertChannels(user),
         fetchAlertPolicies(user),
+        fetchAlertPreferences(user),
         fetchAlertEvents(user, 30),
       ]);
 
@@ -171,6 +176,7 @@ export default function AlertsPage() {
       setDefaultPolicy(normalizedDefault);
       setDraftDefaultPolicy(normalizedDefault);
       setMonitorPolicies(Array.isArray(policySnapshot?.monitorPolicies) ? policySnapshot.monitorPolicies : []);
+      setPreferences(normalizePreferencesForForm(preferenceSnapshot));
       setEvents(Array.isArray(eventItems) ? eventItems : []);
       setEventsLoaded(true);
       setEventsPage(1);
@@ -206,6 +212,22 @@ export default function AlertsPage() {
     [channels]
   );
 
+  const channelActivityMap = useMemo(() => {
+    const next = {};
+    for (const event of events) {
+      const key = event.channelId || "system";
+      if (!next[key]) {
+        next[key] = { sent: 0, failed: 0, lastEvent: null };
+      }
+      if (event.status === "sent") next[key].sent += 1;
+      if (event.status === "failed") next[key].failed += 1;
+      if (!next[key].lastEvent || new Date(event.createdAt).getTime() > new Date(next[key].lastEvent.createdAt).getTime()) {
+        next[key].lastEvent = event;
+      }
+    }
+    return next;
+  }, [events]);
+
   const summary = useMemo(() => ({
     activeChannels: channels.filter((channel) => channel.enabled).length,
     defaultCoverage: defaultPolicy.applyMode === "selected"
@@ -214,7 +236,9 @@ export default function AlertsPage() {
     overrides: monitorPolicies.length,
     failedEvents: eventsLoaded ? events.filter((event) => event.status === "failed").length : "--",
     sentEvents:   eventsLoaded ? events.filter((event) => event.status === "sent").length   : "--",
-  }), [channels, defaultPolicy.applyMode, defaultPolicy.targetMonitorIds.length, events, eventsLoaded, monitorPolicies.length, monitors.length, monitorsLoading]);
+    personalChannels: preferences.channelIds.length,
+    personalTriggers: Object.values(preferences.triggers || {}).filter(Boolean).length,
+  }), [channels, defaultPolicy.applyMode, defaultPolicy.targetMonitorIds.length, events, eventsLoaded, monitorPolicies.length, monitors.length, monitorsLoading, preferences.channelIds.length, preferences.triggers]);
 
   const paginatedEvents = useMemo(() => {
     const start = (eventsPage - 1) * ALERT_EVENTS_PAGE_SIZE;
@@ -328,7 +352,7 @@ export default function AlertsPage() {
 
   async function handleSaveDefaultPolicy(event) {
     event.preventDefault();
-    if (!isOwner) return;
+    if (!canManageWorkspaceAlerts) return;
     if (draftDefaultPolicy.applyMode === "selected" && draftDefaultPolicy.targetMonitorIds.length === 0) {
       setError("Choose at least one monitor or switch the rule to all monitors.");
       return;
@@ -352,7 +376,7 @@ export default function AlertsPage() {
 
   async function handleSaveOverride(event) {
     event.preventDefault();
-    if (!isOwner) return;
+    if (!canManageWorkspaceAlerts) return;
     if (!overrideMonitorId) {
       setError("Select a monitor for the custom rule.");
       return;
@@ -401,6 +425,25 @@ export default function AlertsPage() {
     }
   }
 
+  async function handleSavePreferences(event) {
+    event.preventDefault();
+    setSavingPreferences(true);
+    setError("");
+
+    try {
+      const saved = await saveAlertPreferences(user, {
+        enabled: Boolean(preferences.enabled),
+        channelIds: Array.isArray(preferences.channelIds) ? preferences.channelIds : [],
+        triggers: preferences.triggers,
+      });
+      setPreferences(normalizePreferencesForForm(saved));
+    } catch (err) {
+      setError(err?.message || "Could not save your alert preferences.");
+    } finally {
+      setSavingPreferences(false);
+    }
+  }
+
   if (loading) {
     return (
       <PageLoader />
@@ -438,8 +481,17 @@ export default function AlertsPage() {
             <SummaryCard label="Active Channels"    value={summary.activeChannels}  caption="Enabled destinations" />
             <SummaryCard label="Successful Sends"   value={summary.sentEvents}       caption="Delivered this session"  />
             <SummaryCard label="Failed Deliveries"  value={summary.failedEvents}      caption="Recent failures" />
-            <SummaryCard label="Default Coverage"   value={summary.defaultCoverage}  caption={defaultPolicy.applyMode === "selected" ? "Selected monitors" : "All monitors"} />
-            <SummaryCard label="Custom Rules"        value={summary.overrides}         caption="Monitor overrides" />
+            {canManageWorkspaceAlerts ? (
+              <>
+                <SummaryCard label="Workspace Coverage" value={summary.defaultCoverage} caption={defaultPolicy.applyMode === "selected" ? "Selected monitors" : "All monitors"} />
+                <SummaryCard label="Custom Rules" value={summary.overrides} caption="Monitor overrides" />
+              </>
+            ) : (
+              <>
+                <SummaryCard label="My Channels" value={summary.personalChannels} caption="Personal delivery channels" />
+                <SummaryCard label="My Triggers" value={summary.personalTriggers} caption="Enabled personal triggers" />
+              </>
+            )}
           </section>
 
           <section className="bg-[#0f1217] border border-[#22252b] rounded-xl p-5 md:p-7">
@@ -447,9 +499,9 @@ export default function AlertsPage() {
               <div>
                 <h2 className="text-sm font-medium text-[#edf2fb]">Delivery Channels</h2>
                 <p className="text-sm text-[#8d94a0] mt-2">
-                  {isOwner
-                    ? "Click a channel to configure it. Each channel type can be added once."
-                    : "These channels are managed by the owner or admin."}
+                  {canManageWorkspaceAlerts
+                    ? "Each channel card shows its own delivery settings and recent activity."
+                    : "These shared workspace channels are available for routing, but only owners and admins can edit them."}
                 </p>
               </div>
             </div>
@@ -463,11 +515,11 @@ export default function AlertsPage() {
                   <button
                     key={preset.type}
                     type="button"
-                    onClick={() => isOwner && (existing ? openEditChannel(existing) : openCreateChannelOfType(preset.type))}
-                    disabled={!isOwner}
+                    onClick={() => canManageWorkspaceAlerts && (existing ? openEditChannel(existing) : openCreateChannelOfType(preset.type))}
+                    disabled={!canManageWorkspaceAlerts}
                     className={`relative w-full rounded-xl border p-5 text-left transition ${
                       existing ? "border-[#252a33] bg-[#12161d] hover:bg-[#171c25]" : "border-dashed border-[#2a2f39] bg-[#0c0e12] hover:bg-[#0f1218]"
-                    } ${!isOwner ? "cursor-default" : "cursor-pointer"}`}
+                    } ${!canManageWorkspaceAlerts ? "cursor-default" : "cursor-pointer"}`}
                   >
                     {/* Status badge */}
                     {existing && (
@@ -493,13 +545,24 @@ export default function AlertsPage() {
 
                     {existing ? (
                       <div className="space-y-2">
-                        {/* <p className="text-[12px] text-[#8d94a0] break-all leading-relaxed">{describeChannelConfig(existing)}</p> */}
+                        <p className="text-[12px] text-[#8d94a0] break-all leading-relaxed">{describeChannelConfig(existing)}</p>
                         <div className="flex items-center gap-2 flex-wrap">
                           {health && <span className={`text-[11px] px-2 py-0.5 rounded-full ${health.className}`}>{health.label}</span>}
                           {hasSuccess && <span className="text-[11px] text-[#69e7ba] font-medium">✓ Last sent: {formatTimestamp(existing.lastDeliveryAt)}</span>}
                         </div>
+                        <div className="rounded-lg border border-[#252a33] bg-[#0f1217] px-3 py-2 text-xs text-[#8d94a0]">
+                          <div className="flex items-center justify-between gap-3">
+                            <span>Recent sent: {channelActivityMap[existing.id]?.sent || 0}</span>
+                            <span>Recent failed: {channelActivityMap[existing.id]?.failed || 0}</span>
+                          </div>
+                          <p className="mt-1 text-[#aeb6c3]">
+                            {channelActivityMap[existing.id]?.lastEvent
+                              ? `${formatEventType(channelActivityMap[existing.id].lastEvent.eventType)} at ${formatTimestamp(channelActivityMap[existing.id].lastEvent.createdAt)}`
+                              : "No recent delivery activity for this channel."}
+                          </p>
+                        </div>
                         <div className="flex items-center gap-2 mt-4.5">
-                          {isOwner && (
+                          {canManageWorkspaceAlerts && (
                             <span
                               role="button"
                               tabIndex={0}
@@ -512,7 +575,7 @@ export default function AlertsPage() {
                               {testingChannelId === existing.id ? "Testing…" : "Send Test"}
                             </span>
                           )}
-                          {isOwner && (
+                          {canManageWorkspaceAlerts && (
                             <span className="text-[15px] px-3 py-1.5 rounded-lg border border-[#2a2f39] bg-[#14181e] text-[#d7deea] hover:bg-[#1e2330] transition">
                               Edit
                             </span>
@@ -523,7 +586,7 @@ export default function AlertsPage() {
                       <div className="flex items-center gap-2 mt-2">
                         <Plus className="w-4 h-4 text-[#6b7280]" />
                         <span className="text-[13px] text-[#6b7280]">
-                          {isOwner ? `Connect ${preset.label}` : "Not configured"}
+                          {canManageWorkspaceAlerts ? `Connect ${preset.label}` : "Not configured"}
                         </span>
                       </div>
                     )}
@@ -533,12 +596,103 @@ export default function AlertsPage() {
             </div>
           </section>
 
+          <section className="bg-[#0f1217] border border-[#22252b] rounded-xl p-4 md:p-5 space-y-4">
+            <div>
+              <h2 className="text-sm font-medium text-[#edf2fb]">My Alert Preferences</h2>
+              <p className="text-sm text-[#8d94a0] mt-1">
+                These settings affect only what this signed-in member receives in the current workspace. Shared routing stays separate.
+              </p>
+            </div>
+
+            <form onSubmit={handleSavePreferences} className="space-y-4">
+              <label className="flex items-center gap-2 text-sm text-[#d7deea]">
+                <input
+                  type="checkbox"
+                  checked={preferences.enabled}
+                  onChange={(event) => setPreferences((prev) => ({ ...prev, enabled: event.target.checked }))}
+                />
+                Personal delivery enabled
+              </label>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+                <TriggerToggle
+                  label="Monitor Down"
+                  hint="Notify me when a monitor becomes unavailable."
+                  checked={preferences.triggers.down_open}
+                  onChange={(checked) => setPreferences((prev) => ({ ...prev, triggers: { ...prev.triggers, down_open: checked } }))}
+                />
+                <TriggerToggle
+                  label="Monitor Degraded"
+                  hint="Notify me about degraded checks and partial outages."
+                  checked={preferences.triggers.degraded_open}
+                  onChange={(checked) => setPreferences((prev) => ({ ...prev, triggers: { ...prev.triggers, degraded_open: checked } }))}
+                />
+                <TriggerToggle
+                  label="Monitor Recovered"
+                  hint="Notify me when a failing monitor recovers."
+                  checked={preferences.triggers.recovery}
+                  onChange={(checked) => setPreferences((prev) => ({ ...prev, triggers: { ...prev.triggers, recovery: checked } }))}
+                />
+                <TriggerToggle
+                  label="Incident Created"
+                  hint="Notify me when a new manual incident is opened."
+                  checked={preferences.triggers.incident_created}
+                  onChange={(checked) => setPreferences((prev) => ({ ...prev, triggers: { ...prev.triggers, incident_created: checked } }))}
+                />
+                <TriggerToggle
+                  label="Incident Resolved"
+                  hint="Notify me when an incident is resolved."
+                  checked={preferences.triggers.incident_resolved}
+                  onChange={(checked) => setPreferences((prev) => ({ ...prev, triggers: { ...prev.triggers, incident_resolved: checked } }))}
+                />
+              </div>
+
+              <Field label="My Delivery Channels">
+                <div className="rounded-lg border border-[#252a33] bg-[#14181e] p-3 space-y-2">
+                  {channels.filter((channel) => channel.enabled).length === 0 ? (
+                    <p className="text-sm text-[#8d94a0]">No enabled channels are available yet.</p>
+                  ) : (
+                    channels.filter((channel) => channel.enabled).map((channel) => (
+                      <label key={channel.id} className="flex items-start gap-3 text-sm text-[#d7deea]">
+                        <input
+                          type="checkbox"
+                          checked={preferences.channelIds.includes(channel.id)}
+                          onChange={(event) => setPreferences((prev) => ({
+                            ...prev,
+                            channelIds: event.target.checked
+                              ? [...new Set([...prev.channelIds, channel.id])]
+                              : prev.channelIds.filter((value) => value !== channel.id),
+                          }))}
+                        />
+                        <span className="min-w-0">
+                          <span className="block text-[#edf2fb]">{channel.name}</span>
+                          <span className="block text-xs text-[#8d94a0] mt-1">{describeChannelConfig(channel)}</span>
+                        </span>
+                      </label>
+                    ))
+                  )}
+                </div>
+              </Field>
+
+              <div className="flex justify-end">
+                <button
+                  type="submit"
+                  disabled={savingPreferences}
+                  className="h-10 px-4 rounded-lg bg-[#d3d6dc] text-[#121417] text-sm font-semibold disabled:opacity-50"
+                >
+                  {savingPreferences ? "Saving..." : "Save My Preferences"}
+                </button>
+              </div>
+            </form>
+          </section>
+
+          {canManageWorkspaceAlerts ? (
           <section className="grid grid-cols-1 xl:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)] gap-5">
             <section className="bg-[#0f1217] border border-[#22252b] rounded-xl p-4 md:p-5 space-y-4">
               <div className="flex items-center justify-between gap-3">
                 <div>
-                  <h2 className="text-sm font-medium">Default Alert Rule</h2>
-                  <p className="text-sm text-[#8d94a0] mt-1">This is the shared workspace alert rule. Apply it to every monitor or only the ones you choose.</p>
+                  <h2 className="text-sm font-medium">Workspace Routing</h2>
+                  <p className="text-sm text-[#8d94a0] mt-1">This shared rule decides how workspace monitor alerts are routed before each member's personal preferences are applied.</p>
                 </div>
                 <div className="flex items-center gap-2">
                   <button
@@ -549,7 +703,7 @@ export default function AlertsPage() {
                     <Eye className="w-4 h-4" />
                     View Rule
                   </button>
-                  {isOwner ? (
+                  {canManageWorkspaceAlerts ? (
                     <button
                       type="button"
                       onClick={() => openDefaultPolicy("edit")}
@@ -584,9 +738,6 @@ export default function AlertsPage() {
                 />
               </div>
 
-              <div className="rounded-lg border border-[#252a33] bg-[#12161d] px-4 py-3 text-sm text-[#9aa2af]">
-                Incident opened and incident resolved notifications continue to go to all enabled channels so important operator updates are never hidden behind monitor policy settings.
-              </div>
             </section>
 
             <section className="bg-[#0f1217] border border-[#22252b] rounded-xl p-4 md:p-5 space-y-4">
@@ -595,7 +746,7 @@ export default function AlertsPage() {
                   <h2 className="text-sm font-medium">Custom Monitor Rules</h2>
                   <p className="text-sm text-[#8d94a0] mt-1">Use a custom rule only when one monitor should notify differently from the main rule.</p>
                 </div>
-                {isOwner ? (
+                {canManageWorkspaceAlerts ? (
                   <button
                     type="button"
                     onClick={openCreateOverride}
@@ -617,7 +768,7 @@ export default function AlertsPage() {
                         key={policy.id}
                         type="button"
                         onClick={() => {
-                          if (isOwner) openEditOverride(policy);
+                          if (canManageWorkspaceAlerts) openEditOverride(policy);
                         }}
                         className="w-full rounded-lg border border-[#252a33] bg-[#12161d] px-3 py-3 text-left hover:bg-[#171c25] transition"
                       >
@@ -637,11 +788,12 @@ export default function AlertsPage() {
               )}
             </section>
           </section>
+          ) : null}
 
           <section className="bg-[#0f1217] border border-[#22252b] rounded-xl p-4 md:p-5">
             <div className="mb-4">
               <h2 className="text-sm font-medium">Recent Alert Activity</h2>
-              <p className="text-sm text-[#8d94a0] mt-1">This feed loads after the page settles. Only the latest 10 items are shown per page, and you can open any item for full details.</p>
+              <p className="text-sm text-[#8d94a0] mt-1">Each row shows one delivery attempt with its own status, source, channel, and provider result for this workspace.</p>
             </div>
             {!eventsLoaded ? (
               <EmptyCard message="Recent activity will load shortly..." />
@@ -654,6 +806,7 @@ export default function AlertsPage() {
                   const statusMeta = getEventStatusMeta(event.status);
                   const severityMeta = getSeverityMeta(event.severity);
                   const channel = event.channelId ? channelMap[event.channelId] : null;
+                  const outcomeText = getEventOutcomeText(event);
                   return (
                     <button
                       key={event.id}
@@ -664,17 +817,17 @@ export default function AlertsPage() {
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
                           <div className="flex items-center gap-2 flex-wrap">
-                            <p className="text-sm font-medium text-[#edf2fb]">{truncateText(event.title, 82)}</p>
+                            <p className="text-sm font-medium text-[#edf2fb]">{truncateText(getEventHeadline(event), 82)}</p>
                             <span className={`text-[11px] px-2 py-0.5 rounded-full ${statusMeta.className}`}>{statusMeta.label}</span>
                             <span className={`text-[11px] px-2 py-0.5 rounded-full ${severityMeta.className}`}>{severityMeta.label}</span>
                           </div>
                           <p className="text-xs text-[#8d94a0] mt-1">
-                            {formatSourceType(event.sourceType)} | {channel?.name || "System"} | {formatEventType(event.eventType)} | {formatTimestamp(event.createdAt)}
+                            {formatEventContextLine(event, channel)}
                           </p>
-                          <p className="text-sm text-[#cfd6e3] mt-2">{truncateText(event.message, 160)}</p>
-                          {(event.failureReason || event.suppressionReason || event.providerResponse) ? (
+                          <p className="text-sm text-[#cfd6e3] mt-2">{truncateText(getEventPreview(event), 160)}</p>
+                          {outcomeText ? (
                             <p className="text-xs text-[#7f8793] mt-2">
-                              {truncateText(event.failureReason || event.suppressionReason || event.providerResponse, 120)}
+                              {truncateText(outcomeText, 120)}
                             </p>
                           ) : null}
                         </div>
@@ -1036,13 +1189,15 @@ function PolicyReadView({ policy, channelMap, monitors }) {
 function AlertEventDetails({ event, channel }) {
   const statusMeta = getEventStatusMeta(event.status);
   const severityMeta = getSeverityMeta(event.severity);
+  const incidentCode = extractIncidentCode(event.title);
   const detailRows = [
-    ["Title", event.title],
+    ["Title", getEventHeadline(event)],
+    ["Incident", incidentCode || "--"],
     ["Status", statusMeta.label],
     ["Severity", severityMeta.label],
     ["Source", formatSourceType(event.sourceType)],
     ["Event", formatEventType(event.eventType)],
-    ["Channel", channel?.name || "System"],
+    ["Channel", channel?.name || (event.status === "suppressed" ? "Delivery skipped" : "System")],
     ["Time", formatTimestamp(event.createdAt)],
   ];
 
@@ -1061,14 +1216,14 @@ function AlertEventDetails({ event, channel }) {
 
       <div className="rounded-lg border border-[#252a33] bg-[#12161d] p-4">
         <p className="text-sm font-medium text-[#edf2fb]">Message</p>
-        <p className="text-sm text-[#cfd6e3] mt-3 whitespace-pre-line break-words">{event.message || "--"}</p>
+        <p className="text-sm text-[#cfd6e3] mt-3 whitespace-pre-line break-words">{getEventPreview(event) || "--"}</p>
       </div>
 
-      {(event.failureReason || event.suppressionReason || event.providerResponse) && (
+      {getEventOutcomeText(event) && (
         <div className="rounded-lg border border-[#252a33] bg-[#12161d] p-4">
           <p className="text-sm font-medium text-[#edf2fb]">Delivery Result</p>
           <p className="text-sm text-[#cfd6e3] mt-3 whitespace-pre-line break-words">
-            {event.failureReason || event.suppressionReason || event.providerResponse}
+            {getEventOutcomeText(event)}
           </p>
         </div>
       )}
@@ -1206,6 +1361,60 @@ function formatEventType(eventType) {
   return "Test delivery";
 }
 
+function extractIncidentCode(value) {
+  const match = String(value || "").match(/INC-\d+/i);
+  return match ? match[0].toUpperCase() : "";
+}
+
+function getEventHeadline(event) {
+  if (event?.sourceType === "incident" && event?.eventType === "incident_created") {
+    return "Incident opened";
+  }
+  if (event?.sourceType === "incident" && event?.eventType === "incident_resolved") {
+    return "Incident resolved";
+  }
+  return event?.title || "Alert activity";
+}
+
+function getEventPreview(event) {
+  if (event?.sourceType === "incident") {
+    const incidentCode = extractIncidentCode(event?.title);
+    if (event?.eventType === "incident_created") {
+      return incidentCode
+        ? `${incidentCode} was opened for the affected monitor.`
+        : "An incident was opened for the affected monitor.";
+    }
+    if (event?.eventType === "incident_resolved") {
+      return incidentCode
+        ? `${incidentCode} has been marked resolved.`
+        : "An incident was marked resolved.";
+    }
+  }
+
+  const firstLine = String(event?.message || "")
+    .split("\n")
+    .map((line) => line.trim())
+    .find(Boolean);
+  return firstLine || "Alert activity recorded.";
+}
+
+function getEventOutcomeText(event) {
+  const detail = event?.failureReason || event?.suppressionReason || event?.providerResponse || "";
+  if (!detail) return "";
+  if (/no active channels configured/i.test(detail)) {
+    return "Delivery skipped because this workspace does not have any enabled channels for this event yet.";
+  }
+  if (/suppressed by cooldown/i.test(detail)) {
+    return "Delivery skipped because the alert is inside its cooldown window.";
+  }
+  return detail;
+}
+
+function formatEventContextLine(event, channel) {
+  const channelLabel = channel?.name || (event?.status === "suppressed" ? "Delivery skipped" : "System");
+  return `${formatSourceType(event?.sourceType)} | ${channelLabel} | ${formatEventType(event?.eventType)} | ${formatTimestamp(event?.createdAt)}`;
+}
+
 function formatSourceType(sourceType) {
   if (sourceType === "incident") return "Incident";
   if (sourceType === "monitor") return "Monitor";
@@ -1231,6 +1440,20 @@ function formatTimestamp(value) {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+function normalizePreferencesForForm(preference) {
+  return {
+    enabled: preference?.enabled ?? true,
+    channelIds: Array.isArray(preference?.channelIds) ? preference.channelIds : [],
+    triggers: {
+      down_open: preference?.triggers?.down_open ?? true,
+      degraded_open: preference?.triggers?.degraded_open ?? true,
+      recovery: preference?.triggers?.recovery ?? true,
+      incident_created: preference?.triggers?.incident_created ?? true,
+      incident_resolved: preference?.triggers?.incident_resolved ?? true,
+    },
+  };
 }
 
 function normalizePolicyForForm(policy) {

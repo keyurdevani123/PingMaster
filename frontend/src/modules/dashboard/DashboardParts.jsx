@@ -254,13 +254,15 @@ export function EmptyState({ onAdd }) {
       <p className="text-[#8d94a0] text-sm mb-4">
         Add your first monitor to start collecting uptime and latency trends.
       </p>
-      <button
-        onClick={onAdd}
-        className="bg-[#d3d6dc] hover:opacity-90 text-[#101317] font-semibold px-4 py-2 rounded-lg text-sm transition inline-flex items-center gap-2"
-      >
-        <Plus className="w-4 h-4" />
-        Add Monitor
-      </button>
+      {typeof onAdd === "function" ? (
+        <button
+          onClick={onAdd}
+          className="bg-[#d3d6dc] hover:opacity-90 text-[#101317] font-semibold px-4 py-2 rounded-lg text-sm transition inline-flex items-center gap-2"
+        >
+          <Plus className="w-4 h-4" />
+          Add Monitor
+        </button>
+      ) : null}
     </div>
   );
 }

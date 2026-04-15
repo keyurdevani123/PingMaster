@@ -14,10 +14,13 @@ export default function ForgotPassword() {
     setLoading(true);
 
     try {
-      await sendPasswordResetEmail(auth, email);
+      await sendPasswordResetEmail(auth, email.trim(), {
+        url: `${window.location.origin}/login`,
+        handleCodeInApp: false,
+      });
       setStatus({ 
         type: "success", 
-        message: "Password reset link sent! Check your inbox." 
+        message: "Reset link sent. Check your inbox, promotions, or spam folder if it does not appear in a minute." 
       });
       setEmail("");
     } catch (err) {
@@ -38,7 +41,7 @@ export default function ForgotPassword() {
             Reset Password
           </h1>
           <p className="mt-3 text-sm text-[#acabaa]">
-            Enter your email and we'll send you a reset link.
+            Enter your email and we&apos;ll send a secure reset link back to the sign-in page.
           </p>
         </div>
 

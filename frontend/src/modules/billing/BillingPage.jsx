@@ -1,10 +1,15 @@
-import { useCallback, useEffect, useState } from "react";
-import { ArrowRight, CheckCircle2, CreditCard, ShieldCheck } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { ArrowRight, CheckCircle2, CreditCard, ShieldCheck, Sparkles } from "lucide-react";
 import PageLoader from "../../components/PageLoader";
 import { createBillingSubscription, fetchBilling, verifyBillingSubscription } from "../../api";
 import { useAuth } from "../../context/AuthContext";
 
 const RAZORPAY_CHECKOUT_URL = "https://checkout.razorpay.com/v1/checkout.js";
+const PLAN_RANK = {
+  free: 0,
+  plus: 1,
+  pro: 2,
+};
 
 let razorpayLoader = null;
 const BILLING_SYNC_ATTEMPTS = 6;
@@ -35,22 +40,29 @@ function loadRazorpayCheckout() {
 }
 
 export default function BillingPage() {
-  const { user, workspace, billing: sessionBilling, refreshSession } = useAuth();
+  const { user, workspace, workspaces, billing: sessionBilling, refreshSession, selectWorkspace } = useAuth();
   const [billingState, setBillingState] = useState(sessionBilling || null);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
+  const [selectedPlan, setSelectedPlan] = useState("plus");
+
+  const isTeamWorkspace = workspace?.type === "team";
+  const personalWorkspace = useMemo(
+    () => workspaces.find((item) => item.type === "personal") || null,
+    [workspaces],
+  );
 
   const loadBillingState = useCallback(async ({ silent = false } = {}) => {
     if (!user) return;
     if (!silent) setLoading(true);
     setError("");
     try {
-      const payload = await fetchBilling(user);
+      const payload = await fetchBilling(user, { force: true });
       setBillingState(payload?.billing || null);
     } catch (err) {
-      setError(err?.message || "Could not load billing details.");
+      setError(err?.message || "Could not load plan details.");
     } finally {
       setLoading(false);
     }
@@ -64,12 +76,21 @@ export default function BillingPage() {
     loadBillingState();
   }, [loadBillingState, workspace?.id]);
 
-  async function waitForPaidBillingState() {
+  useEffect(() => {
+    const lockedPlan = getLockedPlanCode(billingState);
+    if (lockedPlan !== "free") {
+      setSelectedPlan(lockedPlan);
+      return;
+    }
+    setSelectedPlan((prev) => (prev === "free" ? "plus" : prev));
+  }, [billingState?.isPaid, billingState?.plan, billingState?.pendingPlan, billingState?.status]);
+
+  async function waitForPaidBillingState(expectedPlan) {
     for (let attempt = 0; attempt < BILLING_SYNC_ATTEMPTS; attempt += 1) {
       const payload = await fetchBilling(user, { force: true });
       const nextBilling = payload?.billing || null;
       setBillingState(nextBilling);
-      if (nextBilling?.isPaid && nextBilling?.plan === "pro") {
+      if (nextBilling?.isPaid && nextBilling?.plan === expectedPlan) {
         return nextBilling;
       }
       if (attempt < BILLING_SYNC_ATTEMPTS - 1) {
@@ -100,9 +121,8 @@ export default function BillingPage() {
 
       const razorpay = new window.Razorpay({
         key: checkout.key,
-        order_id: checkout.orderId,
-        amount: checkout.amount,
-        currency: checkout.currency || "INR",
+        subscription_id: checkout.subscriptionId,
+        recurring: true,
         name: checkout.name,
         description: checkout.description,
         prefill: checkout.prefill,
@@ -111,8 +131,8 @@ export default function BillingPage() {
         handler: async (response) => {
           try {
             await verifyBillingSubscription(user, {
-              orderId: response?.razorpay_order_id || "",
               paymentId: response?.razorpay_payment_id || "",
+              subscriptionId: response?.razorpay_subscription_id || checkout.subscriptionId || "",
               signature: response?.razorpay_signature || "",
             });
             finishResolve(response);
@@ -130,22 +150,26 @@ export default function BillingPage() {
   }
 
   async function handleStartCheckout() {
+    const planToStart = getPlanRank(selectedPlan) < getPlanRank(getLockedPlanCode(billingState || sessionBilling || null))
+      ? getLockedPlanCode(billingState || sessionBilling || null)
+      : selectedPlan;
+    if (planToStart === "free") return;
     setSubmitting(true);
     setError("");
     setSuccess("");
     try {
-      const payload = await createBillingSubscription(user, { plan: "pro" });
+      const payload = await createBillingSubscription(user, { plan: planToStart });
       const checkoutResult = await openCheckout(payload?.checkout);
-      const paidBilling = await waitForPaidBillingState();
-      if (!paidBilling?.isPaid || paidBilling?.plan !== "pro") {
+      const paidBilling = await waitForPaidBillingState(planToStart);
+      if (!paidBilling?.isPaid || paidBilling?.plan !== planToStart) {
         if (checkoutResult?.dismissed) {
-          throw new Error("Checkout closed before PingMaster could confirm the payment. If Razorpay shows success, refresh once and try again.");
+          throw new Error("Checkout closed before PingMaster could confirm the subscription. If Razorpay shows success, refresh once and it should sync.");
         }
-        throw new Error("Payment was received, but Pro access has not synced yet. Refresh in a moment and it should appear.");
+        throw new Error("The subscription was received, but the new plan has not synced yet. Refresh in a moment and it should appear.");
       }
       await refreshSession();
       await loadBillingState({ silent: true });
-      setSuccess("Test payment verified. Pro access is now active for this workspace.");
+      setSuccess(`${paidBilling.planLabel} is now active for your workspace.`);
     } catch (err) {
       setError(err?.message || "Could not complete Razorpay checkout.");
     } finally {
@@ -153,24 +177,42 @@ export default function BillingPage() {
     }
   }
 
+  async function handleSwitchToPersonalWorkspace() {
+    if (!personalWorkspace?.id) return;
+    await selectWorkspace(personalWorkspace.id);
+  }
+
   if (loading) return <PageLoader rows={3} />;
 
   const billing = billingState || sessionBilling || null;
-  const isPro = Boolean(billing?.isPaid && billing?.plan === "pro");
+  const currentPlanCode = getPlanCode(billing?.plan);
+  const lockedPlanCode = getLockedPlanCode(billing);
+  const hasLockedPaidPlan = lockedPlanCode !== "free";
+  const resolvedSelectedPlan = hasLockedPaidPlan && getPlanRank(selectedPlan) < getPlanRank(lockedPlanCode)
+    ? lockedPlanCode
+    : selectedPlan;
+  const displayPlanCode = hasLockedPaidPlan ? lockedPlanCode : currentPlanCode;
+  const displayPlanConfig = (billing?.availablePlans || []).find((plan) => plan.code === displayPlanCode) || null;
+  const displayEntitlements = displayPlanConfig?.entitlements || billing?.entitlements || {};
+  const selectedPlanConfig = (billing?.availablePlans || []).find((plan) => plan.code === resolvedSelectedPlan) || null;
+  const isCurrentSelectionActive = resolvedSelectedPlan !== "free" && billing?.isPaid && billing?.plan === resolvedSelectedPlan;
+  const isAttachedSelection = resolvedSelectedPlan !== "free" && resolvedSelectedPlan === lockedPlanCode && Boolean(billing?.subscriptionId);
 
   return (
     <div className="min-h-screen bg-[#08090b] text-[#f2f2f2]">
       <header className="border-b border-[#1a1d24] bg-[#0d0f13]">
         <div className="max-w-7xl mx-auto px-6 md:px-8 py-5 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
           <div>
-            <p className="text-[11px] uppercase tracking-[0.08em] text-[#8d94a0]">Workspace Billing</p>
-            <h1 className="mt-1 text-2xl font-semibold text-white">Billing</h1>
-            <p className="mt-2 text-sm text-[#8d94a0]">Use Razorpay test mode first, verify payment flow locally, then switch to live keys later.</p>
+            <p className="text-[11px] uppercase tracking-[0.08em] text-[#8d94a0]">Workspace Plans</p>
+            <h1 className="mt-1 text-2xl font-semibold text-white">Plans</h1>
+            <p className="mt-2 text-sm text-[#8d94a0]">Pick the plan that matches your monitor count, shared workspaces, and public status page needs.</p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <span className={`inline-flex items-center rounded-full border px-3 py-1 text-xs ${billing?.mode === "test" ? "border-amber-400/20 bg-amber-400/10 text-amber-100" : "border-emerald-400/20 bg-emerald-400/10 text-emerald-200"}`}>
-              {billing?.mode === "test" ? "Razorpay Test Mode" : "Razorpay Live Mode"}
-            </span>
+            {billing?.mode ? (
+              <span className={`inline-flex items-center rounded-full border px-3 py-1 text-xs ${billing.mode === "test" ? "border-amber-400/20 bg-amber-400/10 text-amber-100" : "border-emerald-400/20 bg-emerald-400/10 text-emerald-200"}`}>
+                {billing.mode === "test" ? "Razorpay Test Mode" : "Razorpay Live Mode"}
+              </span>
+            ) : null}
             <span className="inline-flex items-center rounded-full border border-[#2a2f39] bg-[#12161d] px-3 py-1 text-xs text-[#dbe1eb]">
               {billing?.planLabel || "Free"}
             </span>
@@ -181,77 +223,206 @@ export default function BillingPage() {
       <main className="max-w-7xl mx-auto px-6 md:px-8 py-8 space-y-6">
         {error && <div className="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">{error}</div>}
         {success && <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-200">{success}</div>}
+        {billing?.notice && <div className="rounded-xl border border-[#2b3442] bg-[#10141b] px-4 py-3 text-sm text-[#cfd6e3]">{billing.notice}</div>}
+        {hasLockedPaidPlan ? (
+          <div className="rounded-xl border border-[#2b3442] bg-[#10141b] px-4 py-3 text-sm text-[#cfd6e3]">
+            {billing?.pendingPlan && billing.pendingPlan !== billing?.plan
+              ? `${formatPlanLabel(billing.pendingPlan)} is syncing for this workspace. Lower plans stay locked until the billing state is settled.`
+              : `${formatPlanLabel(lockedPlanCode)} is attached to this workspace. Lower plans stay locked here so the UI cannot drift below your real subscription.`}
+          </div>
+        ) : null}
 
         <section className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <MetricCard label="Plan" value={billing?.planLabel || "Free"} helper={billing?.description || "Workspace plan"} />
-          <MetricCard label="Status" value={formatStatusLabel(billing?.status)} helper={billing?.isPaid ? "Paid access is active" : "No paid access yet"} />
+          <MetricCard
+            label="Current Plan"
+            value={displayPlanConfig?.label || billing?.planLabel || "Free"}
+            helper={displayPlanConfig?.description || billing?.description || "Workspace plan"}
+          />
+          <MetricCard
+            label="Plan Status"
+            value={formatStatusLabel(billing?.status)}
+            helper={billing?.isPaid ? "Paid access is active" : hasLockedPaidPlan ? "Paid plan is attached and syncing" : "Core access only"}
+          />
           <MetricCard label="Renewal" value={formatDate(billing?.currentPeriodEnd)} helper={billing?.currentPeriodEnd ? "Current billing period end" : "No renewal scheduled"} />
+        </section>
+
+        {billing?.usage ? (
+          <section className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <MetricCard
+              label="Monitors Used"
+              value={formatUsageValue(billing.usage.monitors, displayEntitlements?.maxMonitors)}
+              helper="Across workspaces you own"
+            />
+            <MetricCard
+              label="Status Pages"
+              value={formatUsageValue(billing.usage.statusPages, displayEntitlements?.maxStatusPages)}
+              helper="Published public status pages"
+            />
+            <MetricCard
+              label="Shared Workspaces"
+              value={formatUsageValue(billing.usage.teamWorkspaces, displayEntitlements?.maxTeamWorkspaces)}
+              helper="Workspaces created from your personal workspace"
+            />
+          </section>
+        ) : null}
+
+        <section className="rounded-xl border border-[#22252b] bg-[#0f1217] p-5">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <h2 className="text-xl font-semibold text-white">Choose the right plan</h2>
+              <p className="mt-2 text-sm text-[#8d94a0]">Slack and Discord alerts are available on every plan. Plus unlocks shared workspaces and AI insights. Pro lifts the operating limits further.</p>
+            </div>
+            <div className="w-11 h-11 rounded-xl border border-[#252a33] bg-[#14181e] grid place-items-center shrink-0">
+              <CreditCard className="w-5 h-5 text-[#dbe1eb]" />
+            </div>
+          </div>
+
+          <div className="mt-5 grid grid-cols-1 xl:grid-cols-3 gap-4">
+            {(billing?.availablePlans || []).map((plan) => {
+              const active = plan.code === currentPlanCode;
+              const selected = plan.code === resolvedSelectedPlan;
+              const lockedOut = hasLockedPaidPlan && getPlanRank(plan.code) < getPlanRank(lockedPlanCode);
+              return (
+                <button
+                  key={plan.code}
+                  type="button"
+                  onClick={() => {
+                    if (!lockedOut) setSelectedPlan(plan.code);
+                  }}
+                  disabled={lockedOut}
+                  className={`rounded-xl border p-5 text-left transition ${selected ? "border-white/20 bg-[#171c25]" : "border-[#252a33] bg-[#14181e] hover:bg-[#171c25]"} ${active ? "shadow-[0_0_0_1px_rgba(255,255,255,0.06)]" : ""} ${lockedOut ? "cursor-not-allowed opacity-50 hover:bg-[#14181e]" : ""}`}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <h3 className="text-lg font-semibold text-white">{plan.label}</h3>
+                      <p className="mt-1 text-sm text-[#8d94a0]">{plan.description}</p>
+                    </div>
+                    <div className="flex flex-col items-end gap-2">
+                      {active ? (
+                        <span className="rounded-full border border-emerald-400/20 bg-emerald-400/10 px-3 py-1 text-[11px] text-emerald-200">Current</span>
+                      ) : null}
+                      {lockedOut ? (
+                        <span className="rounded-full border border-[#2b3442] bg-[#10141b] px-3 py-1 text-[11px] text-[#aab4c3]">Lower tier locked</span>
+                      ) : null}
+                    </div>
+                  </div>
+
+                  <div className="mt-5">
+                    <p className="text-2xl font-semibold text-white">{plan.priceMonthlyLabel || "Custom"}</p>
+                    <p className="mt-1 text-xs text-[#6f7785]">Monthly recurring subscription</p>
+                  </div>
+
+                  <div className="mt-4 space-y-2.5">
+                    {(plan.features || []).map((feature) => (
+                      <FeatureRow key={feature} text={feature} />
+                    ))}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
         </section>
 
         <section className="grid grid-cols-1 xl:grid-cols-[1.1fr_0.9fr] gap-6">
           <section className="rounded-xl border border-[#22252b] bg-[#0f1217] p-5">
             <div className="flex items-start justify-between gap-4">
               <div>
-                <h2 className="text-xl font-semibold text-white">Current workspace access</h2>
-                <p className="mt-2 text-sm text-[#8d94a0]">Billing is attached to the selected workspace. The first paid feature wired right now is team workspace creation.</p>
+                <h2 className="text-xl font-semibold text-white">Selected plan details</h2>
+                <p className="mt-2 text-sm text-[#8d94a0]">Review the limit changes before you start checkout.</p>
               </div>
               <div className="w-11 h-11 rounded-xl border border-[#252a33] bg-[#14181e] grid place-items-center shrink-0">
-                <CreditCard className="w-5 h-5 text-[#dbe1eb]" />
+                <Sparkles className="w-5 h-5 text-[#dbe1eb]" />
               </div>
             </div>
 
-            <div className="mt-5 grid grid-cols-1 md:grid-cols-2 gap-4">
-              {(billing?.availablePlans || []).map((plan) => {
-                const active = plan.code === billing?.plan;
-                return (
-                  <article key={plan.code} className={`rounded-xl border p-4 ${active ? "border-white/12 bg-[#161b23]" : "border-[#252a33] bg-[#14181e]"}`}>
-                    <div className="flex items-center justify-between gap-3">
-                      <div>
-                        <h3 className="text-lg font-semibold text-white">{plan.label}</h3>
-                        <p className="mt-1 text-sm text-[#8d94a0]">{plan.description}</p>
-                      </div>
-                      {active && <span className="rounded-full border border-emerald-400/20 bg-emerald-400/10 px-3 py-1 text-[11px] text-emerald-200">Current</span>}
-                    </div>
-                    <div className="mt-4 space-y-2.5">
-                      {(plan.features || []).map((feature) => (
-                        <FeatureRow key={feature} text={feature} />
-                      ))}
-                    </div>
-                  </article>
-                );
-              })}
-            </div>
+            {selectedPlanConfig ? (
+              <div className="mt-5 space-y-5">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <MetricCard
+                    label="Monitors"
+                    value={formatLimit(selectedPlanConfig.entitlements?.maxMonitors)}
+                    helper="Parent monitors across your owned workspaces"
+                  />
+                  <MetricCard
+                    label="Status Pages"
+                    value={formatLimit(selectedPlanConfig.entitlements?.maxStatusPages)}
+                    helper="Public pages you can publish"
+                  />
+                  <MetricCard
+                    label="Shared Workspaces"
+                    value={formatLimit(selectedPlanConfig.entitlements?.maxTeamWorkspaces)}
+                    helper="Workspaces you can create for collaboration"
+                  />
+                </div>
+
+                <div className="rounded-xl border border-[#252a33] bg-[#14181e] p-4 space-y-3">
+                  <InfoLine icon={CheckCircle2} text="Slack, Discord, and email delivery are available across all plans." />
+                  <InfoLine icon={ShieldCheck} text={selectedPlanConfig.entitlements?.canUseAiReports ? "AI insights are included in this plan." : "AI insights are not included in this plan."} />
+                  <InfoLine icon={ArrowRight} text={resolvedSelectedPlan === "free" ? "Stay on Free for core monitoring." : "Razorpay verifies the subscription before the new plan is activated."} />
+                </div>
+              </div>
+            ) : null}
           </section>
 
           <section className="rounded-xl border border-[#22252b] bg-[#0f1217] p-5 space-y-5">
             <div>
-              <h2 className="text-xl font-semibold text-white">Start test checkout</h2>
+              <h2 className="text-xl font-semibold text-white">{isTeamWorkspace ? "Shared workspace billing" : "Plan checkout"}</h2>
               <p className="mt-2 text-sm text-[#8d94a0]">
-                {billing?.mode === "test"
-                  ? "This workspace is ready for Razorpay test payments. Use test cards or UPI in checkout, then PingMaster verifies the payment before any feature unlock happens."
-                  : "The billing backend is wired, but this workspace is not currently using a test key."}
+                {isTeamWorkspace
+                  ? "Shared workspaces inherit the owner's paid plan, but they cannot be purchased directly."
+                  : billing?.mode === "test"
+                    ? "This workspace is ready for Razorpay test subscriptions. Use test cards or test UPI in checkout."
+                    : "Use this page to start or change a recurring paid plan for your personal workspace."}
               </p>
             </div>
 
-            <div className="rounded-xl border border-[#252a33] bg-[#14181e] p-4 space-y-3">
-              <InfoLine icon={ShieldCheck} text="Payment unlocks only after backend signature verification." />
-              <InfoLine icon={CheckCircle2} text="Webhook updates keep billing in sync after the initial checkout verification." />
-              <InfoLine icon={ArrowRight} text="After a successful test payment, team workspace creation becomes available." />
-            </div>
-
-            <button
-              type="button"
-              onClick={handleStartCheckout}
-              disabled={submitting || !billing?.checkoutReady || isPro}
-              className="h-11 px-5 rounded-lg bg-white text-black text-sm font-semibold inline-flex items-center gap-2 disabled:opacity-50"
-            >
-              {isPro ? "Pro Already Active" : submitting ? "Opening Checkout..." : billing?.mode === "test" ? "Start Test Checkout" : "Upgrade to Pro"}
-            </button>
-
-            {!billing?.checkoutReady && (
-              <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
-                Razorpay keys are not configured yet.
+            {isTeamWorkspace ? (
+              <div className="rounded-xl border border-[#2b3442] bg-[#10141b] p-4 space-y-4">
+                <p className="text-sm text-[#d5dcea]">Switch to your personal workspace to purchase, renew, or change plans. This shared workspace will continue to inherit that plan automatically.</p>
+                <button
+                  type="button"
+                  onClick={handleSwitchToPersonalWorkspace}
+                  disabled={!personalWorkspace?.id}
+                  className="h-11 px-5 rounded-lg bg-white text-black text-sm font-semibold inline-flex items-center gap-2 disabled:opacity-50"
+                >
+                  Open Personal Workspace
+                </button>
               </div>
+            ) : (
+              <>
+                <div className="rounded-xl border border-[#252a33] bg-[#14181e] p-4 space-y-3">
+                  <InfoLine icon={ShieldCheck} text="Subscriptions unlock only after backend signature verification." />
+                  <InfoLine icon={CheckCircle2} text="Webhook updates keep renewals and plan state in sync after the first checkout." />
+                  <InfoLine icon={ArrowRight} text="Plus unlocks shared workspaces. Pro raises the limits further." />
+                </div>
+
+                <button
+                  type="button"
+                  onClick={handleStartCheckout}
+                  disabled={submitting || !billing?.checkoutReady || resolvedSelectedPlan === "free" || isCurrentSelectionActive || isAttachedSelection}
+                  className="h-11 px-5 rounded-lg bg-white text-black text-sm font-semibold inline-flex items-center gap-2 disabled:opacity-50"
+                >
+                  {resolvedSelectedPlan === "free"
+                    ? "Free Plan Selected"
+                    : isCurrentSelectionActive || isAttachedSelection
+                      ? `${selectedPlanConfig?.label || "Plan"} Already Active`
+                      : submitting
+                        ? "Opening Subscription..."
+                        : `Start ${selectedPlanConfig?.label || "Selected"} Subscription`}
+                </button>
+
+                {resolvedSelectedPlan === "free" ? (
+                  <div className="rounded-lg border border-[#252a33] bg-[#14181e] px-4 py-3 text-sm text-[#cfd6e3]">
+                    Free stays active by default. Select Plus or Pro when you want higher limits.
+                  </div>
+                ) : null}
+
+                {!billing?.checkoutReady ? (
+                  <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
+                    Razorpay keys are not configured yet.
+                  </div>
+                ) : null}
+              </>
             )}
           </section>
         </section>
@@ -305,4 +476,34 @@ function formatDate(value) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "--";
   return date.toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" });
+}
+
+function getPlanCode(value) {
+  const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
+  return normalized in PLAN_RANK ? normalized : "free";
+}
+
+function getPlanRank(value) {
+  return PLAN_RANK[getPlanCode(value)] ?? PLAN_RANK.free;
+}
+
+function getLockedPlanCode(billing) {
+  const currentPlan = getPlanCode(billing?.plan);
+  const pendingPlan = getPlanCode(billing?.pendingPlan);
+  return getPlanRank(pendingPlan) > getPlanRank(currentPlan) ? pendingPlan : currentPlan;
+}
+
+function formatPlanLabel(value) {
+  const planCode = getPlanCode(value);
+  return planCode.charAt(0).toUpperCase() + planCode.slice(1);
+}
+
+function formatUsageValue(current, limit) {
+  if (!Number.isFinite(limit) || limit <= 0) return `${current || 0}`;
+  return `${current || 0} / ${limit}`;
+}
+
+function formatLimit(limit) {
+  if (!Number.isFinite(limit) || limit <= 0) return "Not included";
+  return String(limit);
 }

@@ -20,6 +20,7 @@ import {
   createIncident,
   fetchIncidents,
   fetchMonitors,
+  fetchTeamMembers,
   generateIncidentCreationSuggestions,
   generateIncidentResolveSuggestions,
   updateIncident,
@@ -35,6 +36,7 @@ import {
 
 const INCIDENT_FORM_DEFAULTS = {
   monitorId: "",
+  assignedToUserId: "",
   severity: "high",
   title: "",
   description: "",
@@ -61,6 +63,7 @@ export default function Incidents() {
   const navigate = useNavigate();
 
   const [monitors, setMonitors] = useState([]);
+  const [members, setMembers] = useState([]);
   const [incidents, setIncidents] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -68,6 +71,7 @@ export default function Incidents() {
   const [actioningId, setActioningId] = useState("");
   const [error, setError] = useState("");
   const [monitorsLoading, setMonitorsLoading] = useState(false);
+  const [membersLoading, setMembersLoading] = useState(false);
   const deferredLoadRef = useRef(null);
 
   const [query, setQuery] = useState("");
@@ -81,7 +85,7 @@ export default function Incidents() {
 
   const [incidentForm, setIncidentForm] = useState(INCIDENT_FORM_DEFAULTS);
   const [resolutionForm, setResolutionForm] = useState(RESOLUTION_FORM_DEFAULTS);
-  const isOwner = currentMembershipRole === "owner";
+  const canManageIncidents = ["owner", "admin"].includes(currentMembershipRole);
 
   const clearDeferredMonitorLoad = useCallback(() => {
     if (deferredLoadRef.current) {
@@ -102,6 +106,24 @@ export default function Incidents() {
       setMonitorsLoading(false);
     }
   }, [user, workspace?.id]);
+
+  const loadMembersSection = useCallback(async () => {
+    if (!user || !workspace?.id) return;
+    if (workspace?.type !== "team") {
+      const fallbackName = user?.displayName || user?.email || "You";
+      setMembers([{ userId: user.uid, email: user.email || "", role: currentMembershipRole, displayName: fallbackName }]);
+      return;
+    }
+    setMembersLoading(true);
+    try {
+      const memberItems = await fetchTeamMembers(user);
+      setMembers(Array.isArray(memberItems) ? memberItems : []);
+    } catch {
+      setMembers([]);
+    } finally {
+      setMembersLoading(false);
+    }
+  }, [currentMembershipRole, user, workspace?.id, workspace?.type]);
 
   const scheduleMonitorLoad = useCallback(() => {
     clearDeferredMonitorLoad();
@@ -126,13 +148,14 @@ export default function Incidents() {
       const incidentItems = await fetchIncidents(user);
       setIncidents(Array.isArray(incidentItems) ? incidentItems : []);
       scheduleMonitorLoad();
+      loadMembersSection();
     } catch {
       setError("Could not load incidents.");
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [clearDeferredMonitorLoad, scheduleMonitorLoad, user, workspace?.id]);
+  }, [clearDeferredMonitorLoad, loadMembersSection, scheduleMonitorLoad, user, workspace?.id]);
 
   useEffect(() => {
     if (!user || !workspace?.id) return;
@@ -145,6 +168,11 @@ export default function Incidents() {
   async function ensureMonitorsLoaded() {
     if (monitors.length > 0 || monitorsLoading) return;
     await loadMonitorsSection();
+  }
+
+  async function ensureMembersLoaded() {
+    if (members.length > 0 || membersLoading) return;
+    await loadMembersSection();
   }
 
   const monitorMap = useMemo(() => {
@@ -222,8 +250,8 @@ export default function Incidents() {
   }
 
   async function openCreateModal() {
-    if (!isOwner) return;
-    await ensureMonitorsLoaded();
+    if (!canManageIncidents) return;
+    await Promise.all([ensureMonitorsLoaded(), ensureMembersLoaded()]);
     resetIncidentForm();
     setEditingIncidentId("");
     setShowCreateModal(true);
@@ -235,10 +263,11 @@ export default function Incidents() {
   }
 
   async function openEditModal(incident) {
-    await ensureMonitorsLoaded();
+    await Promise.all([ensureMonitorsLoaded(), ensureMembersLoaded()]);
     setEditingIncidentId(incident.id);
     setIncidentForm({
       monitorId: incident.monitorId || "",
+      assignedToUserId: incident.assignedToUserId || "",
       severity: incident.severity || "high",
       title: incident.title || "",
       description: incident.description || "",
@@ -274,6 +303,7 @@ export default function Incidents() {
     try {
       const createdIncident = await createIncident(user, {
         monitorId: incidentForm.monitorId,
+        assignedToUserId: incidentForm.assignedToUserId || null,
         severity: incidentForm.severity,
         title: incidentForm.title.trim(),
         description: incidentForm.description.trim(),
@@ -301,6 +331,7 @@ export default function Incidents() {
     try {
       const updatedIncident = await updateIncident(user, editingIncident.id, {
         fields: {
+          assignedToUserId: incidentForm.assignedToUserId || null,
           severity: incidentForm.severity,
           title: incidentForm.title.trim(),
           description: incidentForm.description.trim(),
@@ -384,11 +415,11 @@ export default function Incidents() {
             <button
               type="button"
               onClick={openCreateModal}
-              disabled={!isOwner}
+              disabled={!canManageIncidents}
               className="h-10 px-4 rounded-lg bg-[#d3d6dc] text-[#111317] text-sm font-semibold inline-flex items-center gap-2"
             >
               <Plus className="w-4 h-4" />
-              {isOwner ? "Create Incident" : "Owner Only"}
+              {canManageIncidents ? "Create Incident" : "Admin Only"}
             </button>
           </div>
         </header>
@@ -490,7 +521,7 @@ export default function Incidents() {
                 <IncidentCard
                   key={incident.id}
                   incident={incident}
-                  isOwner={isOwner}
+                  canManageIncidents={canManageIncidents}
                   busy={actioningId === incident.id}
                   onAction={handleIncidentAction}
                   onOpenDetails={() => navigate(`/incidents/${incident.id}`)}
@@ -510,6 +541,8 @@ export default function Incidents() {
           user={user}
           form={incidentForm}
           monitors={monitors}
+          members={members}
+          membersLoading={membersLoading}
           disableMonitor={false}
           submitting={submitting}
           submitLabel="Create Incident"
@@ -526,6 +559,8 @@ export default function Incidents() {
           user={user}
           form={incidentForm}
           monitors={monitors}
+          members={members}
+          membersLoading={membersLoading}
           disableMonitor
           submitting={submitting}
           submitLabel="Save Changes"
@@ -552,7 +587,7 @@ export default function Incidents() {
 
 function IncidentCard({
   incident,
-  isOwner,
+  canManageIncidents,
   busy,
   onAction,
   onOpenDetails,
@@ -617,6 +652,9 @@ function IncidentCard({
               Opened: {formatTimestamp(incident.startedAt)}
             </div>
             <div className="rounded-lg border border-[#252a33] bg-[#10141b] px-3 py-2">
+              Assigned: {incident.assignedToUserId || "Unassigned"}
+            </div>
+            <div className="rounded-lg border border-[#252a33] bg-[#10141b] px-3 py-2">
               Ack: {incident.acknowledgedAt ? formatTimestamp(incident.acknowledgedAt) : "Pending"}
             </div>
             {incident.resolvedAt && (
@@ -639,7 +677,7 @@ function IncidentCard({
             </button>
           )}
 
-          {canEdit && (
+          {canEdit && canManageIncidents && (
             <button
               type="button"
               onClick={onOpenEdit}
@@ -649,7 +687,7 @@ function IncidentCard({
             </button>
           )}
 
-          {incident.status !== "resolved" && isOwner && (
+          {incident.status !== "resolved" && canManageIncidents && (
             <button
               type="button"
               onClick={onOpenResolve}
@@ -660,7 +698,7 @@ function IncidentCard({
             </button>
           )}
 
-          {incident.status === "resolved" && isOwner && (
+          {incident.status === "resolved" && canManageIncidents && (
             <button
               type="button"
               onClick={() => onAction(incident.id, "reopen")}
@@ -691,6 +729,8 @@ function IncidentFormModal({
   user,
   form,
   monitors,
+  members,
+  membersLoading,
   disableMonitor = false,
   submitting,
   submitLabel,
@@ -700,22 +740,22 @@ function IncidentFormModal({
 }) {
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState("");
-  const [aiSuggestion, setAiSuggestion] = useState(null);
+  const [aiStatus, setAiStatus] = useState("");
   const selectedMonitor = monitors.find((monitor) => monitor.id === form.monitorId) || null;
 
   useEffect(() => {
-    setAiSuggestion(null);
     setAiError("");
+    setAiStatus("");
   }, [form.monitorId]);
 
   async function handleSuggest() {
     if (!user || !form.monitorId) return;
     setAiLoading(true);
     setAiError("");
+    setAiStatus("");
     try {
       const payload = await generateIncidentCreationSuggestions(user, form.monitorId);
       const suggestions = payload?.suggestions || null;
-      setAiSuggestion(payload || null);
       if (suggestions) {
         onChange((prev) => ({
           ...prev,
@@ -726,6 +766,7 @@ function IncidentFormModal({
           rootCause: suggestions.rootCause && suggestions.rootCause !== "--" ? suggestions.rootCause : "",
           nextSteps: suggestions.nextSteps && suggestions.nextSteps !== "--" ? suggestions.nextSteps : "",
         }));
+        setAiStatus("Fields filled from Gemini.");
       }
     } catch (err) {
       setAiError(err?.message || "Could not generate incident suggestions.");
@@ -773,39 +814,31 @@ function IncidentFormModal({
           </FormField>
         </div>
 
-        {selectedMonitor ? (
-          <SuggestionPanel
-            eyebrow="Creation Suggestions"
-            title="Monitor-aware incident starter"
-            description={`Use Gemini to draft the incident from ${selectedMonitor.name}${selectedMonitor.status ? `, currently ${formatMonitorStatusLabel(selectedMonitor.status).toLowerCase()}` : ""}.`}
+        <FormField label="Assign To">
+          <select
+            value={form.assignedToUserId}
+            onChange={(event) => onChange((prev) => ({ ...prev, assignedToUserId: event.target.value }))}
+            className="w-full h-11 bg-[#14181e] border border-[#252a33] text-sm text-[#dbe1eb] rounded-lg px-3 focus:outline-none"
           >
-            <div className="flex flex-wrap items-center gap-3">
-              <button
-                type="button"
-                onClick={handleSuggest}
-                disabled={aiLoading}
-                className="h-9 px-4 rounded-lg border border-[#2a2f39] bg-[#161b22] text-sm text-[#d4dae4] disabled:opacity-50"
-              >
-                {aiLoading ? "Suggesting..." : aiSuggestion ? "Suggest Again" : "Suggest With AI"}
-              </button>
-              {aiSuggestion?.generatedAt ? (
-                <p className="text-xs text-[#7f8793]">Generated {formatTimestamp(aiSuggestion.generatedAt)}</p>
-              ) : null}
-            </div>
-            {aiError ? <p className="text-sm text-[#f0a496]">{aiError}</p> : null}
-            {aiSuggestion?.suggestions ? (
-              <>
-                <SuggestionRow label="Suggested severity" value={toSeverityLabel(aiSuggestion.suggestions.severity)} />
-                <SuggestionRow label="Suggested title" value={aiSuggestion.suggestions.title} />
-                <SuggestionRow label="Suggested impact" value={aiSuggestion.suggestions.impactSummary} />
-                <SuggestionRow label="Suggested details" value={aiSuggestion.suggestions.description} />
-                <SuggestionRow label="Suggested probable cause" value={aiSuggestion.suggestions.rootCause} />
-                <SuggestionRow label="Suggested next steps" value={aiSuggestion.suggestions.nextSteps} />
-              </>
-            ) : (
-              <p className="text-sm text-[#8d94a0]">Choose a monitor, then run Suggest With AI to autofill the incident fields from the latest status and recent history.</p>
-            )}
-          </SuggestionPanel>
+            <option value="">{membersLoading ? "Loading members..." : "Unassigned"}</option>
+            {(members || []).map((member) => (
+              <option key={member.userId} value={member.userId}>
+                {member.displayName || member.email || member.userId}
+              </option>
+            ))}
+          </select>
+        </FormField>
+
+        {selectedMonitor ? (
+          <AiAssistBar
+            label="Gemini Assist"
+            description={`Use the latest state from ${selectedMonitor.name}${selectedMonitor.status ? `, currently ${formatMonitorStatusLabel(selectedMonitor.status).toLowerCase()}` : ""}, to fill the incident form.`}
+            actionLabel={aiLoading ? "Filling..." : "Autofill With Gemini"}
+            loading={aiLoading}
+            error={aiError}
+            status={aiStatus}
+            onClick={handleSuggest}
+          />
         ) : null}
 
         <FormField label="Incident Title">
@@ -885,22 +918,23 @@ function IncidentFormModal({
 function ResolveIncidentModal({ user, incident, form, submitting, onChange, onClose, onSubmit }) {
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState("");
-  const [aiSuggestion, setAiSuggestion] = useState(null);
+  const [aiStatus, setAiStatus] = useState("");
 
   async function handleSuggest() {
     if (!user || !incident?.id) return;
     setAiLoading(true);
     setAiError("");
+    setAiStatus("");
     try {
       const payload = await generateIncidentResolveSuggestions(user, incident.id);
       const suggestions = payload?.suggestions || null;
-      setAiSuggestion(payload || null);
       if (suggestions) {
         onChange((prev) => ({
           ...prev,
           fixSummary: suggestions.fixSummary && suggestions.fixSummary !== "--" ? suggestions.fixSummary : prev.fixSummary,
           resolutionNotes: suggestions.resolutionNotes && suggestions.resolutionNotes !== "--" ? suggestions.resolutionNotes : prev.resolutionNotes,
         }));
+        setAiStatus("Closure fields filled from Gemini.");
       }
     } catch (err) {
       setAiError(err?.message || "Could not generate resolve suggestions.");
@@ -922,34 +956,15 @@ function ResolveIncidentModal({ user, incident, form, submitting, onChange, onCl
           <p className="text-sm text-[#8d94a0] mt-1">{incident.monitorName}</p>
         </div>
 
-        <SuggestionPanel
-          eyebrow="Resolve Suggestion"
-          title="Timeline-aware resolve draft"
-          description="Use Gemini to draft the closure fields from the recent response timeline and the latest monitor status."
-        >
-          <div className="flex flex-wrap items-center gap-3">
-            <button
-              type="button"
-              onClick={handleSuggest}
-              disabled={aiLoading}
-              className="h-9 px-4 rounded-lg border border-[#2a2f39] bg-[#161b22] text-sm text-[#d4dae4] disabled:opacity-50"
-            >
-              {aiLoading ? "Suggesting..." : aiSuggestion ? "Suggest Again" : "Suggest With AI"}
-            </button>
-            {aiSuggestion?.generatedAt ? (
-              <p className="text-xs text-[#7f8793]">Generated {formatTimestamp(aiSuggestion.generatedAt)}</p>
-            ) : null}
-          </div>
-          {aiError ? <p className="text-sm text-[#f0a496]">{aiError}</p> : null}
-          {aiSuggestion?.suggestions ? (
-            <>
-              <SuggestionRow label="Suggested fix summary" value={aiSuggestion.suggestions.fixSummary} />
-              <SuggestionRow label="Suggested resolution notes" value={aiSuggestion.suggestions.resolutionNotes} />
-            </>
-          ) : (
-            <p className="text-sm text-[#8d94a0]">Run Suggest With AI to autofill the closure fields from your incident timeline and latest monitor state.</p>
-          )}
-        </SuggestionPanel>
+        <AiAssistBar
+          label="Gemini Assist"
+          description="Fill the closure fields from the latest incident timeline and monitor state without adding extra content blocks to the page."
+          actionLabel={aiLoading ? "Filling..." : "Autofill With Gemini"}
+          loading={aiLoading}
+          error={aiError}
+          status={aiStatus}
+          onClick={handleSuggest}
+        />
 
         <FormField label="How Was It Fixed?">
           <textarea
@@ -1018,52 +1033,31 @@ function ModalShell({ title, description, children, onClose, sizeClassName = "ma
   );
 }
 
-function SuggestionPanel({ eyebrow, title, description, children }) {
+function AiAssistBar({ label, description, actionLabel, loading, error, status, onClick }) {
   return (
-    <section className="rounded-xl border border-[#252a33] bg-[#11161d] p-4 space-y-3">
-      <div>
-        <p className="text-[11px] uppercase tracking-[0.08em] text-[#8d94a0]">{eyebrow}</p>
-        <h4 className="text-sm font-medium text-[#edf2fb] mt-1">{title}</h4>
-        <p className="text-xs leading-5 text-[#8d94a0] mt-1">{description}</p>
-      </div>
-      <div className="space-y-3">{children}</div>
-    </section>
-  );
-}
-
-function SuggestionRow({ label, value, actionLabel, onAction }) {
-  return (
-    <div className="rounded-lg border border-[#252a33] bg-[#0d1118] px-3 py-3">
-      <div className="flex items-start justify-between gap-3">
+    <section className="rounded-xl border border-[#252a33] bg-[#11161d] p-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="min-w-0">
           <p className="text-[11px] uppercase tracking-[0.08em] text-[#8d94a0]">{label}</p>
-          <p className="text-sm leading-6 text-[#dbe2ee] mt-1 whitespace-pre-wrap">{value || "--"}</p>
+          <p className="text-sm text-[#dbe2ee] mt-1">{description}</p>
         </div>
-        {onAction && actionLabel ? (
-          <button
-            type="button"
-            onClick={onAction}
-            className="h-8 shrink-0 px-3 rounded-lg border border-[#2a2f39] bg-[#161b22] text-xs text-[#d4dae4]"
-          >
-            {actionLabel}
-          </button>
-        ) : null}
+        <button
+          type="button"
+          onClick={onClick}
+          disabled={loading}
+          className="h-9 px-4 rounded-lg border border-[#2a2f39] bg-[#161b22] text-sm text-[#d4dae4] disabled:opacity-50"
+        >
+          {actionLabel}
+        </button>
       </div>
-    </div>
+      {status || error ? (
+        <div className="mt-3 flex flex-wrap items-center gap-3 text-sm">
+          {status ? <span className="text-[#8fe4be]">{status}</span> : null}
+          {error ? <span className="text-[#f0a496]">{error}</span> : null}
+        </div>
+      ) : null}
+    </section>
   );
-}
-
-function formatMonitorStatusLabel(status) {
-  if (status === "UP_RESTRICTED") return "Up Restricted";
-  if (status === "DOWN") return "Down";
-  if (status === "MAINTENANCE") return "Maintenance";
-  return "Up";
-}
-
-function toSeverityLabel(severity) {
-  const value = String(severity || "").trim().toLowerCase();
-  if (!value) return "--";
-  return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
 function FormField({ label, children }) {
@@ -1073,6 +1067,13 @@ function FormField({ label, children }) {
       {children}
     </label>
   );
+}
+
+function formatMonitorStatusLabel(status) {
+  if (status === "UP_RESTRICTED") return "Up Restricted";
+  if (status === "DOWN") return "Down";
+  if (status === "MAINTENANCE") return "Maintenance";
+  return "Up";
 }
 
 function NavItem(props) {

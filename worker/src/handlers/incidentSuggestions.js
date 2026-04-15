@@ -1,6 +1,7 @@
 import { json } from "../lib/http.js";
 import { hydrateIncident } from "../services/incidents.js";
 import { generateIncidentCreationSuggestions, generateIncidentResolveSuggestions } from "../services/incidentSuggestions.js";
+import { isPersonalWorkspaceId, workspaceCollectionHasItem } from "../services/workspaces.js";
 
 export async function postIncidentCreationSuggestionsHandler(request, redis, auth, workspace, membership, corsHeaders, env) {
   let body = {};
@@ -46,15 +47,19 @@ export async function postIncidentResolveSuggestionsHandler(request, redis, auth
 async function getWorkspaceIncident(redis, userId, workspaceId, incidentId) {
   const incident = await redis.get(`incident:${incidentId}`);
   if (!incident) return null;
-  if (incident.workspaceId && incident.workspaceId !== workspaceId) return null;
-  if (!incident.workspaceId && incident.userId !== userId) return null;
+  if (incident.userId === userId) return incident;
+  const fallbackKey = isPersonalWorkspaceId(workspaceId) ? `user:${userId}:incidents` : null;
+  const allowed = await workspaceCollectionHasItem(redis, workspaceId, "incidents", incidentId, fallbackKey);
+  if (!allowed) return null;
   return incident;
 }
 
 async function getWorkspaceMonitor(redis, userId, workspaceId, monitorId) {
   const monitor = await redis.get(`monitor:${monitorId}`);
   if (!monitor) return null;
-  if (monitor.workspaceId && monitor.workspaceId !== workspaceId) return null;
-  if (!monitor.workspaceId && monitor.userId !== userId) return null;
+  if (monitor.userId === userId) return monitor;
+  const fallbackKey = isPersonalWorkspaceId(workspaceId) ? `user:${userId}:monitors` : null;
+  const allowed = await workspaceCollectionHasItem(redis, workspaceId, "monitors", monitorId, fallbackKey);
+  if (!allowed) return null;
   return monitor;
 }

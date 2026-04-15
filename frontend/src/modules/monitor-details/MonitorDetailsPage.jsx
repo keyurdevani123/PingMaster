@@ -1,5 +1,6 @@
 ﻿import { useCallback, useEffect, useMemo, useState } from "react";
 import PageLoader from "../../components/PageLoader";
+import { Suspense, lazy, useDeferredValue } from "react";
 import {
   RefreshCw,
   LayoutGrid,
@@ -8,8 +9,6 @@ import {
   CalendarClock,
   Globe,
   Users,
-  Settings,
-  Bell,
   Shield,
   Activity,
   Search,
@@ -28,11 +27,11 @@ import {
   Tooltip,
   ReferenceArea,
 } from "recharts";
-import MonitorPsiTab from "../../components/MonitorPsiTab";
-import MonitorAiReportTab from "../../components/MonitorAiReportTab";
 import { useAuth } from "../../context/AuthContext";
 import {
+  fetchChildMonitors,
   fetchMonitorWorkspace,
+  fetchHistory,
   fetchEndpointSuggestions,
   fetchMonitorAiReport,
   generateMonitorAiReport,
@@ -47,6 +46,8 @@ import {
   createMaintenance,
   updateMaintenance,
 } from "../../api";
+const LazyMonitorPsiTab = lazy(() => import("../../components/MonitorPsiTab"));
+const LazyMonitorAiReportTab = lazy(() => import("../../components/MonitorAiReportTab"));
 import { buildIncidentTimeline, filterHistoryByRange } from "../../utils/incidents";
 import { ActionButton, MetricCard, NavItem, Row, SurfaceStat, TabButton } from "./MonitorDetailsParts";
 import {
@@ -83,6 +84,10 @@ export default function MonitorDetailsPage() {
   const [monitor, setMonitor] = useState(null);
   const [history, setHistory] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyLoaded, setHistoryLoaded] = useState(false);
+  const [childrenLoading, setChildrenLoading] = useState(false);
+  const [childrenLoaded, setChildrenLoaded] = useState(false);
   const [error, setError] = useState("");
 
   const [tab, setTab] = useState(() => readUiPreference(monitorId, "tab", "overview"));
@@ -117,6 +122,7 @@ export default function MonitorDetailsPage() {
   const [editingMaintenanceId, setEditingMaintenanceId] = useState("");
   const [maintenanceError, setMaintenanceError] = useState("");
   const [maintenanceLoaded, setMaintenanceLoaded] = useState(false);
+  const deferredEndpointQuery = useDeferredValue(endpointQuery);
 
   const isChildMonitor = monitor?.type === "child";
   const fallbackParentId = location.state?.parentId;
@@ -133,6 +139,10 @@ export default function MonitorDetailsPage() {
     setAiReport(null);
     setAiReportLoaded(false);
     setAiReportError("");
+    setHistory([]);
+    setHistoryLoaded(false);
+    setChildMonitors([]);
+    setChildrenLoaded(false);
   }, [monitorId]);
 
   const loadDetails = useCallback(async ({ silent = false } = {}) => {
@@ -140,7 +150,7 @@ export default function MonitorDetailsPage() {
     if (!silent) setLoading(true);
     setError("");
     try {
-      const payload = await fetchMonitorWorkspace(user, monitorId, { historyLimit: 2016, includeChildren: true });
+      const payload = await fetchMonitorWorkspace(user, monitorId, { historyLimit: 1, includeChildren: false });
       const found = payload?.monitor;
       if (!found) {
         setError("Monitor not found.");
@@ -151,13 +161,15 @@ export default function MonitorDetailsPage() {
       }
 
       setMonitor(found);
-      setHistory(Array.isArray(payload.history) ? payload.history : []);
-      setChildMonitors(Array.isArray(payload.childMonitors) ? payload.childMonitors : []);
+      setHistory([]);
+      setHistoryLoaded(false);
+      setChildMonitors([]);
+      setChildrenLoaded(found.type === "child");
       setEndpointSuggestionsLoaded(false);
       setShowSuggestions(false);
 
       const initialEndpoints = Array.from(
-        new Set([found.url, ...(found.endpoints || []), ...((payload.childMonitors || []).map((child) => child.url))].filter(Boolean))
+        new Set([found.url, ...(found.endpoints || [])].filter(Boolean))
       );
       setSelectedEndpoints(new Set(found.endpoints?.length ? found.endpoints : [found.url]));
       setAllEndpoints(initialEndpoints);
@@ -171,6 +183,48 @@ export default function MonitorDetailsPage() {
   useEffect(() => {
     loadDetails();
   }, [loadDetails]);
+
+  const loadHistorySection = useCallback(async () => {
+    if (!user || !monitor?.id || historyLoading || historyLoaded) return;
+    setHistoryLoading(true);
+    try {
+      const items = await fetchHistory(user, monitor.id, 2016);
+      setHistory(Array.isArray(items) ? items : []);
+      setHistoryLoaded(true);
+    } catch (err) {
+      setError(err?.message || "Could not load monitor history.");
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, [historyLoaded, historyLoading, monitor?.id, user]);
+
+  const loadChildMonitorsSection = useCallback(async () => {
+    if (!user || !monitor?.id || isChildMonitor || childrenLoading || childrenLoaded) return;
+    setChildrenLoading(true);
+    try {
+      const items = await fetchChildMonitors(user, monitor.id);
+      const nextChildren = Array.isArray(items) ? items : [];
+      setChildMonitors(nextChildren);
+      setAllEndpoints((prev) => Array.from(new Set([monitor.url, ...prev, ...(monitor.endpoints || []), ...nextChildren.map((child) => child.url).filter(Boolean)])));
+      setChildrenLoaded(true);
+    } catch (err) {
+      setError(err?.message || "Could not load child monitors.");
+    } finally {
+      setChildrenLoading(false);
+    }
+  }, [childrenLoaded, childrenLoading, isChildMonitor, monitor?.endpoints, monitor?.id, monitor?.url, user]);
+
+  useEffect(() => {
+    if (tab === "overview") {
+      loadHistorySection();
+    }
+  }, [loadHistorySection, tab]);
+
+  useEffect(() => {
+    if (tab === "endpoints") {
+      loadChildMonitorsSection();
+    }
+  }, [loadChildMonitorsSection, tab]);
 
   useEffect(() => {
     writeUiPreference(monitorId, "tab", tab);
@@ -507,10 +561,10 @@ export default function MonitorDetailsPage() {
     [filteredHistory]
   );
   const filteredEndpoints = useMemo(() => {
-    const q = endpointQuery.trim().toLowerCase();
+    const q = deferredEndpointQuery.trim().toLowerCase();
     if (!q) return allEndpoints;
     return allEndpoints.filter((endpoint) => endpoint.toLowerCase().includes(q));
-  }, [allEndpoints, endpointQuery]);
+  }, [allEndpoints, deferredEndpointQuery]);
   const endpointCoverage = useMemo(() => ({
     configured: monitor?.endpoints?.length || 1,
     discovered: allEndpoints.length,
@@ -577,13 +631,6 @@ export default function MonitorDetailsPage() {
             </div>
           </div>
           <div className="flex items-center gap-2 md:gap-3 pt-1 shrink-0">
-            <button type="button" className="h-10 w-10 rounded-lg border border-[#252a33] bg-[#14181e] grid place-items-center text-[#a7afbd]">
-              <Bell className="w-4 h-4" />
-            </button>
-            <button type="button" className="h-10 px-3 rounded-lg border border-[#252a33] bg-[#14181e] text-[#d4dae4] text-sm inline-flex items-center gap-2">
-              <Settings className="w-4 h-4" />
-              Settings
-            </button>
             <button type="button" onClick={logout} className="h-10 px-3 rounded-lg border border-[#252a33] bg-[#14181e] text-[#d4dae4] text-sm">
               Logout
             </button>
@@ -687,7 +734,9 @@ export default function MonitorDetailsPage() {
                     </div>
                   </div>
                   <div className="h-72">
-                    {chartData.length === 0 ? (
+                    {historyLoading ? (
+                      <div className="h-full flex items-center justify-center text-[#6f7785] text-sm">Loading latency history...</div>
+                    ) : chartData.length === 0 ? (
                       <div className="h-full flex items-center justify-center text-[#6f7785] text-sm">No history available for selected range.</div>
                     ) : (
                       <ResponsiveContainer width="100%" height="100%">
@@ -890,26 +939,30 @@ export default function MonitorDetailsPage() {
               )} */}
             </section>
           ) : tab === "insights" ? (
-            <MonitorPsiTab
-              monitorName={monitor.name}
-              monitorUrl={monitor.url}
-              psiEligible={monitor.psiEligible}
-              psiReason={monitor.psiReason}
-              psiData={psiData}
-              psiStrategy={psiStrategy}
-              psiLoading={psiLoading}
-              psiError={psiError}
-              onStrategyChange={setPsiStrategy}
-              onRunAudit={handleRunPsi}
-            />
+            <Suspense fallback={<TabLoadingState label="Loading PSI tab..." />}>
+              <LazyMonitorPsiTab
+                monitorName={monitor.name}
+                monitorUrl={monitor.url}
+                psiEligible={monitor.psiEligible}
+                psiReason={monitor.psiReason}
+                psiData={psiData}
+                psiStrategy={psiStrategy}
+                psiLoading={psiLoading}
+                psiError={psiError}
+                onStrategyChange={setPsiStrategy}
+                onRunAudit={handleRunPsi}
+              />
+            </Suspense>
           ) : tab === "ai-report" ? (
-            <MonitorAiReportTab
-              monitor={monitor}
-              reportPayload={aiReport}
-              loading={aiReportLoading}
-              error={aiReportError}
-              onGenerate={handleGenerateAiReport}
-            />
+            <Suspense fallback={<TabLoadingState label="Loading AI report tab..." />}>
+              <LazyMonitorAiReportTab
+                monitor={monitor}
+                reportPayload={aiReport}
+                loading={aiReportLoading}
+                error={aiReportError}
+                onGenerate={handleGenerateAiReport}
+              />
+            </Suspense>
           ) : (
             <section className="space-y-5">
               <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -1017,7 +1070,9 @@ export default function MonitorDetailsPage() {
                   <h3 className="text-sm font-medium">Child Monitors</h3>
                   <p className="text-sm text-[#8d94a0] mt-1">These endpoints already have independent status, latency, and incident history.</p>
                 </div>
-                {childMonitors.length === 0 ? (
+                {childrenLoading && !childrenLoaded ? (
+                  <p className="text-sm text-[#8d94a0]">Loading child monitors...</p>
+                ) : childMonitors.length === 0 ? (
                   <p className="text-sm text-[#8d94a0]">No child monitors yet. Add endpoints as monitors to track them independently.</p>
                 ) : (
                   <div className="space-y-2">
@@ -1076,6 +1131,14 @@ export default function MonitorDetailsPage() {
       ) : null}
       </main>
     </div>
+  );
+}
+
+function TabLoadingState({ label }) {
+  return (
+    <section className="rounded-xl border border-[#22252b] bg-[#0f1217] p-5 text-sm text-[#8d94a0]">
+      {label}
+    </section>
   );
 }
 

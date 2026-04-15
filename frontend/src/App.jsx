@@ -51,6 +51,7 @@ function App() {
             <Route path="/monitors/:monitorId"            element={<ProtectedLayout><MonitorDetails /></ProtectedLayout>} />
             <Route path="/monitors/:monitorId/endpoints"  element={<ProtectedLayout><MonitorEndpoints /></ProtectedLayout>} />
             <Route path="/status-pages"                   element={<ProtectedLayout><StatusPages /></ProtectedLayout>} />
+            <Route path="/plans"                          element={<ProtectedLayout><Billing /></ProtectedLayout>} />
             <Route path="/billing"                        element={<ProtectedLayout><Billing /></ProtectedLayout>} />
             <Route path="/workspaces"                     element={<ProtectedLayout><Workspaces /></ProtectedLayout>} />
             <Route path="/team"                           element={<ProtectedLayout><Workspaces /></ProtectedLayout>} />

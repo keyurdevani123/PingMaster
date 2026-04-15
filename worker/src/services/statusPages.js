@@ -83,9 +83,14 @@ export async function listStatusPages(redis, userId, workspaceId) {
     const page = await redis.get(`status_page:${id}`);
     if (!page) continue;
     if (page.workspaceId !== workspaceId) continue;
+    const publicPayload = await getPublicStatusPayloadCached(redis, page);
     pages.push({
       ...page,
       selectedMonitorCount: Array.isArray(page.selectedMonitorIds) ? page.selectedMonitorIds.length : 0,
+      activeIncidentCount: Array.isArray(publicPayload?.activeIncidents) ? publicPayload.activeIncidents.length : 0,
+      recentResolvedIncidentCount: Array.isArray(publicPayload?.recentResolvedIncidents) ? publicPayload.recentResolvedIncidents.length : 0,
+      activeMaintenanceCount: Array.isArray(publicPayload?.maintenance?.active) ? publicPayload.maintenance.active.length : 0,
+      upcomingMaintenanceCount: Array.isArray(publicPayload?.maintenance?.upcoming) ? publicPayload.maintenance.upcoming.length : 0,
     });
   }
   return pages;

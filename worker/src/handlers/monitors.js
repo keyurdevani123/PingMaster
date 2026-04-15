@@ -1,15 +1,18 @@
 import { MONITOR_INDEX_KEY, MONITOR_PAGE_MAX_LIMIT } from "../config/constants.js";
+import { getBillingPlanConfig, getEntitlementsForBilling, getWorkspaceBilling } from "../services/billing.js";
 import { json } from "../lib/http.js";
 import { attachPsiCapability } from "../lib/psi.js";
 import { buildChildMonitorName, getBaseEndpoint, isStaticPath, normalizeEndpointList } from "../lib/urls.js";
 import { buildMonitorMetricsSummary, checkEndpoint, pingMonitor, validateMonitorCandidate } from "../services/monitoring.js";
 import { invalidateWorkspaceStatusPageCaches } from "../services/statusPages.js";
+import { countOwnedMonitors } from "../services/planUsage.js";
 import {
   ensureWorkspaceMembership,
   ensureWorkspaceScopedRecord,
   getWorkspaceCollectionIds,
   isPersonalWorkspaceId,
   removeWorkspaceMembership,
+  workspaceCollectionHasItem,
 } from "../services/workspaces.js";
 
 const WORKSPACE_SUMMARY_CACHE_MS = 10 * 60 * 1000;
@@ -68,6 +71,18 @@ async function pruneStaleIds(redis, workspaceId, fallbackKey, staleIds) {
   );
 }
 
+async function canAccessWorkspaceMonitor(redis, monitor, userId, workspaceId) {
+  if (!monitor?.id) return false;
+  if (monitor.userId === userId) return true;
+  return workspaceCollectionHasItem(
+    redis,
+    workspaceId,
+    "monitors",
+    monitor.id,
+    isPersonalWorkspaceId(workspaceId) ? `user:${userId}:monitors` : null
+  );
+}
+
 // ── Handlers ───────────────────────────────────────────────────────────────────
 
 export async function addMonitor(request, redis, userId, workspaceId, corsHeaders) {
@@ -81,6 +96,17 @@ export async function addMonitor(request, redis, userId, workspaceId, corsHeader
   const { name, url } = body;
   if (!name || !url) {
     return json({ error: "name and url are required" }, 400, corsHeaders);
+  }
+
+  const workspace = workspaceId ? await redis.get(`workspace:${workspaceId}`) : null;
+  const billing = await getWorkspaceBilling(redis, workspace || workspaceId);
+  const entitlements = getEntitlementsForBilling(billing);
+  const ownedMonitorCount = await countOwnedMonitors(redis, userId);
+  if (Number.isFinite(entitlements.maxMonitors) && ownedMonitorCount >= entitlements.maxMonitors) {
+    const currentPlan = getBillingPlanConfig(billing?.plan);
+    return json({
+      error: `Your ${currentPlan.label} plan includes up to ${entitlements.maxMonitors} monitor${entitlements.maxMonitors === 1 ? "" : "s"}. Upgrade to add more.`,
+    }, 403, corsHeaders);
   }
 
   const canonicalUrl = getBaseEndpoint(url);
@@ -295,9 +321,7 @@ export async function deleteMonitor(request, redis, userId, workspaceId, id, cor
 export async function getChildMonitors(request, redis, userId, workspaceId, parentId, corsHeaders) {
   const parent = await redis.get(`monitor:${parentId}`);
   if (!parent) return json({ error: "Monitor not found" }, 404, corsHeaders);
-  if (parent.workspaceId && parent.workspaceId !== workspaceId)
-    return json({ error: "Forbidden" }, 403, corsHeaders);
-  if (!parent.workspaceId && parent.userId !== userId)
+  if (!(await canAccessWorkspaceMonitor(redis, parent, userId, workspaceId)))
     return json({ error: "Forbidden" }, 403, corsHeaders);
 
   const childIds = await redis.lrange(`monitor:${parentId}:children`, 0, -1);
@@ -313,9 +337,7 @@ export async function getChildMonitors(request, redis, userId, workspaceId, pare
 export async function addChildMonitors(request, redis, userId, workspaceId, parentId, corsHeaders) {
   const parent = await redis.get(`monitor:${parentId}`);
   if (!parent) return json({ error: "Monitor not found" }, 404, corsHeaders);
-  if (parent.workspaceId && parent.workspaceId !== workspaceId)
-    return json({ error: "Forbidden" }, 403, corsHeaders);
-  if (!parent.workspaceId && parent.userId !== userId)
+  if (!(await canAccessWorkspaceMonitor(redis, parent, userId, workspaceId)))
     return json({ error: "Forbidden" }, 403, corsHeaders);
 
   let body;
@@ -426,9 +448,7 @@ export async function addChildMonitors(request, redis, userId, workspaceId, pare
 export async function getHistory(request, redis, userId, workspaceId, id, corsHeaders) {
   const monitor = await redis.get(`monitor:${id}`);
   if (!monitor) return json({ error: "Monitor not found" }, 404, corsHeaders);
-  if (monitor.workspaceId && monitor.workspaceId !== workspaceId)
-    return json({ error: "Forbidden" }, 403, corsHeaders);
-  if (!monitor.workspaceId && monitor.userId !== userId)
+  if (!(await canAccessWorkspaceMonitor(redis, monitor, userId, workspaceId)))
     return json({ error: "Forbidden" }, 403, corsHeaders);
 
   const url = new URL(request.url);
@@ -441,9 +461,7 @@ export async function getHistory(request, redis, userId, workspaceId, id, corsHe
 export async function updateMonitorEndpoints(request, redis, userId, workspaceId, id, corsHeaders) {
   const monitor = await redis.get(`monitor:${id}`);
   if (!monitor) return json({ error: "Monitor not found" }, 404, corsHeaders);
-  if (monitor.workspaceId && monitor.workspaceId !== workspaceId)
-    return json({ error: "Forbidden" }, 403, corsHeaders);
-  if (!monitor.workspaceId && monitor.userId !== userId)
+  if (!(await canAccessWorkspaceMonitor(redis, monitor, userId, workspaceId)))
     return json({ error: "Forbidden" }, 403, corsHeaders);
 
   let body;
@@ -469,9 +487,7 @@ export async function updateMonitorEndpoints(request, redis, userId, workspaceId
 export async function pingSingle(request, redis, userId, workspaceId, id, env, corsHeaders, ctx = null) {
   const monitor = await redis.get(`monitor:${id}`);
   if (!monitor) return json({ error: "Monitor not found" }, 404, corsHeaders);
-  if (monitor.workspaceId && monitor.workspaceId !== workspaceId)
-    return json({ error: "Forbidden" }, 403, corsHeaders);
-  if (!monitor.workspaceId && monitor.userId !== userId)
+  if (!(await canAccessWorkspaceMonitor(redis, monitor, userId, workspaceId)))
     return json({ error: "Forbidden" }, 403, corsHeaders);
 
   const { historyEntry } = await pingMonitor(redis, monitor, env, {

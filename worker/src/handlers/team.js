@@ -1,5 +1,6 @@
 import { json } from "../lib/http.js";
-import { getWorkspaceBilling, getEntitlementsForBilling } from "../services/billing.js";
+import { getBillingPlanConfig, getWorkspaceBilling, getEntitlementsForBilling } from "../services/billing.js";
+import { countOwnedTeamWorkspaces } from "../services/planUsage.js";
 import {
   createTeamWorkspace,
   deleteWorkspace,
@@ -21,25 +22,37 @@ export async function postTeamWorkspace(request, redis, auth, workspace, members
   if (membership?.role !== "owner") {
     return json({ error: "Only workspace owners can create team workspaces." }, 403, corsHeaders);
   }
-  const billing = await getWorkspaceBilling(redis, workspace);
-  const entitlements = getEntitlementsForBilling(billing);
-  if (!entitlements.canCreateTeamWorkspaces) {
-    return json({ error: "Upgrade to Pro to create team workspaces." }, 403, corsHeaders);
-  }
-
-  let body;
   try {
-    body = await request.json();
-  } catch {
-    return json({ error: "Invalid JSON body" }, 400, corsHeaders);
-  }
+    const billing = await getWorkspaceBilling(redis, workspace);
+    const entitlements = getEntitlementsForBilling(billing);
+    if (!entitlements.canCreateTeamWorkspaces) {
+      return json({ error: "Upgrade to Plus or Pro to create shared workspaces." }, 403, corsHeaders);
+    }
 
-  const result = await createTeamWorkspace(redis, auth.userId, auth.email || "", workspace, body);
-  if (!result.ok) {
-    return json({ error: result.error }, 400, corsHeaders);
-  }
+    const currentCount = await countOwnedTeamWorkspaces(redis, auth.userId);
+    if (Number.isFinite(entitlements.maxTeamWorkspaces) && currentCount >= entitlements.maxTeamWorkspaces) {
+      const currentPlan = getBillingPlanConfig(billing?.plan);
+      return json({
+        error: `Your ${currentPlan.label} plan includes up to ${entitlements.maxTeamWorkspaces} shared workspace${entitlements.maxTeamWorkspaces === 1 ? "" : "s"}. Upgrade to create another one.`,
+      }, 403, corsHeaders);
+    }
 
-  return json(result, 201, corsHeaders);
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return json({ error: "Invalid JSON body" }, 400, corsHeaders);
+    }
+
+    const result = await createTeamWorkspace(redis, auth.userId, auth.email || "", workspace, body);
+    if (!result.ok) {
+      return json({ error: result.error }, 400, corsHeaders);
+    }
+
+    return json(result, 201, corsHeaders);
+  } catch (err) {
+    return json({ error: err?.message || "Could not create workspace." }, 500, corsHeaders);
+  }
 }
 
 export async function getTeamMembers(request, redis, auth, workspace, membership, corsHeaders) {
