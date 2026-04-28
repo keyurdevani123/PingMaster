@@ -133,8 +133,7 @@ npm run test:auth
 ```text
 PingMaster/
 |-- frontend/   # React client
-|-- worker/     # Cloudflare Worker backend
-`-- docs/       # Supporting project documents and diagrams
+`-- worker/     # Cloudflare Worker backend
 ```
 
 ## Current Focus
@@ -145,7 +144,3 @@ The project currently emphasizes:
 - faster incident response through AI-assisted suggestions
 - efficient data access through cached summaries and reduced Redis reads
 - clean workspace boundaries for shared monitoring and response workflows
-
-## Note
-
-This repository contains both product code and supporting project artifacts such as reports, diagrams, and poster material. The application code lives mainly inside `frontend/` and `worker/`.
