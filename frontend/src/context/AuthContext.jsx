@@ -50,10 +50,87 @@ function readBootstrapCache(userId) {
   const raw = readStoredValue(getBootstrapStorageKey(userId));
   if (!raw) return null;
   try {
-    return JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+    return isRecord(parsed) ? parsed : null;
   } catch {
     return null;
   }
+}
+
+function isRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function normalizeWorkspaceRecord(value, fallbackWorkspace) {
+  if (!isRecord(value)) return fallbackWorkspace;
+
+  const nextId = typeof value.id === "string" && value.id.trim() ? value.id.trim() : fallbackWorkspace.id;
+  return {
+    ...fallbackWorkspace,
+    ...value,
+    id: nextId,
+    slug: typeof value.slug === "string" && value.slug.trim() ? value.slug.trim() : fallbackWorkspace.slug,
+    name: typeof value.name === "string" && value.name.trim() ? value.name.trim() : fallbackWorkspace.name,
+    type: value.type === "team" ? "team" : "personal",
+    ownerUserId: typeof value.ownerUserId === "string" && value.ownerUserId.trim()
+      ? value.ownerUserId.trim()
+      : fallbackWorkspace.ownerUserId,
+  };
+}
+
+function normalizeBillingSummary(value) {
+  if (!isRecord(value)) return null;
+  return {
+    ...value,
+    entitlements: isRecord(value.entitlements) ? value.entitlements : {},
+    availablePlans: Array.isArray(value.availablePlans) ? value.availablePlans : [],
+    checkoutSession: isRecord(value.checkoutSession) ? value.checkoutSession : null,
+    planLabel: typeof value.planLabel === "string" && value.planLabel.trim() ? value.planLabel.trim() : "Free",
+    plan: typeof value.plan === "string" && value.plan.trim() ? value.plan.trim().toLowerCase() : "free",
+  };
+}
+
+function normalizeBootstrapPayload(firebaseUser, bootstrap) {
+  const fallbackWorkspace = buildFallbackWorkspace(firebaseUser);
+  if (!isRecord(bootstrap)) {
+    return {
+      defaultWorkspace: fallbackWorkspace,
+      currentWorkspace: fallbackWorkspace,
+      workspaces: [fallbackWorkspace],
+      featureFlags: {},
+      billing: null,
+      entitlements: {},
+      currentMembershipRole: "owner",
+    };
+  }
+
+  const defaultWorkspace = normalizeWorkspaceRecord(bootstrap.defaultWorkspace, fallbackWorkspace);
+  const currentWorkspace = normalizeWorkspaceRecord(bootstrap.currentWorkspace, defaultWorkspace);
+  const workspaceList = Array.isArray(bootstrap.workspaces) && bootstrap.workspaces.length > 0
+    ? bootstrap.workspaces
+      .filter((item) => isRecord(item))
+      .map((item) => normalizeWorkspaceRecord(item, fallbackWorkspace))
+    : [defaultWorkspace];
+  const workspaces = workspaceList.some((item) => item.id === currentWorkspace.id)
+    ? workspaceList
+    : [currentWorkspace, ...workspaceList.filter((item) => item.id !== currentWorkspace.id)];
+  const billing = normalizeBillingSummary(bootstrap.billing);
+
+  return {
+    defaultWorkspace,
+    currentWorkspace,
+    workspaces,
+    featureFlags: isRecord(bootstrap.featureFlags) ? bootstrap.featureFlags : {},
+    billing,
+    entitlements: isRecord(bootstrap.entitlements)
+      ? bootstrap.entitlements
+      : (billing?.entitlements || {}),
+    currentMembershipRole: typeof bootstrap.currentMembershipRole === "string" && bootstrap.currentMembershipRole.trim()
+      ? bootstrap.currentMembershipRole.trim()
+      : (typeof currentWorkspace.currentRole === "string" && currentWorkspace.currentRole.trim()
+        ? currentWorkspace.currentRole.trim()
+        : "owner"),
+  };
 }
 
 export function AuthProvider({ children }) {
@@ -70,23 +147,26 @@ export function AuthProvider({ children }) {
   const [currentMembershipRole, setCurrentMembershipRole] = useState("owner");
 
   function applyBootstrapState(firebaseUser, bootstrap, options = {}) {
-    const fallbackWorkspace = buildFallbackWorkspace(firebaseUser);
-    const defaultWorkspace = bootstrap?.defaultWorkspace || fallbackWorkspace;
-    const bootstrapWorkspaces = Array.isArray(bootstrap?.workspaces) && bootstrap.workspaces.length > 0
-      ? bootstrap.workspaces
-      : [defaultWorkspace];
-    const nextWorkspace = bootstrap?.currentWorkspace || defaultWorkspace;
+    const normalized = normalizeBootstrapPayload(firebaseUser, bootstrap);
+    const defaultWorkspace = normalized.defaultWorkspace;
+    const bootstrapWorkspaces = normalized.workspaces;
+    const nextWorkspace = normalized.currentWorkspace;
 
     setWorkspace(nextWorkspace);
     setWorkspaces(bootstrapWorkspaces);
-    setFeatureFlags(bootstrap?.featureFlags || {});
-    setBilling(bootstrap?.billing || null);
-    setEntitlements(bootstrap?.entitlements || bootstrap?.billing?.entitlements || {});
-    setCurrentMembershipRole(bootstrap?.currentMembershipRole || nextWorkspace?.currentRole || "owner");
+    setFeatureFlags(normalized.featureFlags);
+    setBilling(normalized.billing);
+    setEntitlements(normalized.entitlements);
+    setCurrentMembershipRole(normalized.currentMembershipRole);
     setApiWorkspaceId(nextWorkspace?.id || "", { clear: true });
     writeStoredValue(getWorkspaceStorageKey(firebaseUser.uid), nextWorkspace?.id || "");
     if (options.persist !== false) {
-      writeStoredValue(getBootstrapStorageKey(firebaseUser.uid), JSON.stringify(bootstrap || {}));
+      writeStoredValue(getBootstrapStorageKey(firebaseUser.uid), JSON.stringify({
+        ...normalized,
+        defaultWorkspace,
+        currentWorkspace: nextWorkspace,
+        workspaces: bootstrapWorkspaces,
+      }));
     }
   }
 

@@ -13,7 +13,7 @@ const NAV_ITEMS = [
 ];
 
 export default function AppLayout({ children }) {
-  const { user, logout, billing, entitlements, workspace } = useAuth();
+  const { user, logout, billing, entitlements, workspace, bootstrapError } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
   const [profileOpen, setProfileOpen] = useState(false);
@@ -101,6 +101,11 @@ export default function AppLayout({ children }) {
         </header>
 
         <main className="flex-1 min-w-0 overflow-y-auto pb-20 md:pb-0">
+          {bootstrapError ? (
+            <div className="border-b border-amber-500/15 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
+              {bootstrapError} Showing the safest available workspace state while the app retries fresh data.
+            </div>
+          ) : null}
           {children}
         </main>
 

@@ -64,8 +64,13 @@ export async function fetchSessionBootstrap(user, workspaceId = currentWorkspace
   const res = await fetch(`${WORKER_URL}/session/bootstrap`, {
     headers: await authHeaders(user, workspaceId),
   });
-  if (!res.ok) throw new Error("Failed to load workspace session");
-  const payload = await res.json();
+  const payload = await res.json().catch(() => null);
+  if (!res.ok) {
+    throw new Error(payload?.error || "Failed to load workspace session");
+  }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new Error("Workspace session returned an invalid response.");
+  }
   writeApiCache(cacheKey, payload);
   return payload;
 }

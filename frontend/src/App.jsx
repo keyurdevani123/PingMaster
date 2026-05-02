@@ -4,6 +4,7 @@ import { AuthProvider } from "./context/AuthContext";
 import ProtectedRoute from "./components/ProtectedRoute";
 import AppLayout from "./components/AppLayout";
 import PageLoader from "./components/PageLoader";
+import ErrorBoundary from "./components/ErrorBoundary";
 
 const Home = lazy(() => import("./pages/Home"));
 const Login = lazy(() => import("./pages/Login"));
@@ -32,10 +33,11 @@ function ProtectedLayout({ children }) {
 
 function App() {
   return (
-    <BrowserRouter>
-      <AuthProvider>
-        <Suspense fallback={<PageLoader rows={5} />}>
-          <Routes>
+    <ErrorBoundary>
+      <BrowserRouter>
+        <AuthProvider>
+          <Suspense fallback={<PageLoader rows={5} />}>
+            <Routes>
             {/* Public */}
             <Route path="/" element={<Home />} />
             <Route path="/login" element={<Login />} />
@@ -56,11 +58,12 @@ function App() {
             <Route path="/workspaces"                     element={<ProtectedLayout><Workspaces /></ProtectedLayout>} />
             <Route path="/team"                           element={<ProtectedLayout><Workspaces /></ProtectedLayout>} />
 
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Routes>
-        </Suspense>
-      </AuthProvider>
-    </BrowserRouter>
+              <Route path="*" element={<Navigate to="/" replace />} />
+            </Routes>
+          </Suspense>
+        </AuthProvider>
+      </BrowserRouter>
+    </ErrorBoundary>
   );
 }
 
