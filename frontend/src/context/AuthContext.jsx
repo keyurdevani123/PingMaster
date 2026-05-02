@@ -7,6 +7,14 @@ import { fetchSessionBootstrap, setApiWorkspaceId } from "../api";
 // This context holds the current user so any component can access it
 const AuthContext = createContext(null);
 
+function getWorkspaceStorageKey(userId) {
+  return `pingmaster:workspace:${userId}`;
+}
+
+function getBootstrapStorageKey(userId) {
+  return `pingmaster:bootstrap:${userId}`;
+}
+
 function buildFallbackWorkspace(firebaseUser) {
   const suffix = String(firebaseUser?.uid || "default")
     .toLowerCase()
@@ -22,9 +30,36 @@ function buildFallbackWorkspace(firebaseUser) {
   };
 }
 
+function readStoredValue(key) {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return "";
+  }
+}
+
+function writeStoredValue(key, value) {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // Ignore storage write errors.
+  }
+}
+
+function readBootstrapCache(userId) {
+  const raw = readStoredValue(getBootstrapStorageKey(userId));
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);      // null = not logged in
   const [loading, setLoading] = useState(true); // true while Firebase checks session
+  const [bootstrapLoading, setBootstrapLoading] = useState(false);
   const [workspaceSwitching, setWorkspaceSwitching] = useState(false);
   const [workspace, setWorkspace] = useState(null);
   const [workspaces, setWorkspaces] = useState([]);
@@ -34,8 +69,7 @@ export function AuthProvider({ children }) {
   const [bootstrapError, setBootstrapError] = useState("");
   const [currentMembershipRole, setCurrentMembershipRole] = useState("owner");
 
-  async function loadBootstrap(firebaseUser, requestedWorkspaceId = "", options = {}) {
-    const bootstrap = await fetchSessionBootstrap(firebaseUser, requestedWorkspaceId, options);
+  function applyBootstrapState(firebaseUser, bootstrap, options = {}) {
     const fallbackWorkspace = buildFallbackWorkspace(firebaseUser);
     const defaultWorkspace = bootstrap?.defaultWorkspace || fallbackWorkspace;
     const bootstrapWorkspaces = Array.isArray(bootstrap?.workspaces) && bootstrap.workspaces.length > 0
@@ -50,11 +84,15 @@ export function AuthProvider({ children }) {
     setEntitlements(bootstrap?.entitlements || bootstrap?.billing?.entitlements || {});
     setCurrentMembershipRole(bootstrap?.currentMembershipRole || nextWorkspace?.currentRole || "owner");
     setApiWorkspaceId(nextWorkspace?.id || "", { clear: true });
-    try {
-      localStorage.setItem(`pingmaster:workspace:${firebaseUser.uid}`, nextWorkspace?.id || "");
-    } catch {
-      // Ignore storage write errors.
+    writeStoredValue(getWorkspaceStorageKey(firebaseUser.uid), nextWorkspace?.id || "");
+    if (options.persist !== false) {
+      writeStoredValue(getBootstrapStorageKey(firebaseUser.uid), JSON.stringify(bootstrap || {}));
     }
+  }
+
+  async function loadBootstrap(firebaseUser, requestedWorkspaceId = "", options = {}) {
+    const bootstrap = await fetchSessionBootstrap(firebaseUser, requestedWorkspaceId, options);
+    applyBootstrapState(firebaseUser, bootstrap);
   }
 
   useEffect(() => {
@@ -77,33 +115,44 @@ export function AuthProvider({ children }) {
         setBilling(null);
         setEntitlements({});
         setCurrentMembershipRole("owner");
+        setBootstrapLoading(false);
         setWorkspaceSwitching(false);
         setLoading(false);
         return;
       }
 
-      try {
-        if (!active) return;
-        let requestedWorkspaceId = "";
-        try {
-          requestedWorkspaceId = localStorage.getItem(`pingmaster:workspace:${firebaseUser.uid}`) || "";
-        } catch {
-          requestedWorkspaceId = "";
-        }
-        await loadBootstrap(firebaseUser, requestedWorkspaceId);
-      } catch (err) {
-        if (!active) return;
+      const requestedWorkspaceId = readStoredValue(getWorkspaceStorageKey(firebaseUser.uid)) || "";
+      const cachedBootstrap = readBootstrapCache(firebaseUser.uid);
+      if (cachedBootstrap) {
+        applyBootstrapState(firebaseUser, cachedBootstrap, { persist: false });
+        setLoading(false);
+      } else {
         const fallbackWorkspace = buildFallbackWorkspace(firebaseUser);
         setApiWorkspaceId(fallbackWorkspace.id, { clear: true });
         setWorkspace(fallbackWorkspace);
         setWorkspaces([fallbackWorkspace]);
-        setFeatureFlags({});
-        setBilling(null);
-        setEntitlements({});
-        setCurrentMembershipRole("owner");
+      }
+
+      setBootstrapLoading(true);
+      try {
+        if (!active) return;
+        await loadBootstrap(firebaseUser, requestedWorkspaceId);
+      } catch (err) {
+        if (!active) return;
+        if (!cachedBootstrap) {
+          const fallbackWorkspace = buildFallbackWorkspace(firebaseUser);
+          setApiWorkspaceId(fallbackWorkspace.id, { clear: true });
+          setWorkspace(fallbackWorkspace);
+          setWorkspaces([fallbackWorkspace]);
+          setFeatureFlags({});
+          setBilling(null);
+          setEntitlements({});
+          setCurrentMembershipRole("owner");
+        }
         setBootstrapError(err?.message || "Could not load workspace context.");
       } finally {
         if (active) {
+          setBootstrapLoading(false);
           setWorkspaceSwitching(false);
           setLoading(false);
         }
@@ -139,6 +188,7 @@ export function AuthProvider({ children }) {
     <AuthContext.Provider value={{
       user,
       loading,
+      bootstrapLoading,
       workspaceSwitching,
       logout,
       workspace,

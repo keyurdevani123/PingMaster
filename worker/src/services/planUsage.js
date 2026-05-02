@@ -9,7 +9,7 @@ async function listOwnedWorkspaceRecords(redis, userId) {
   const ids = await listOwnedWorkspaceIds(redis, userId);
   if (ids.length === 0) return [];
 
-  const records = await Promise.all(ids.map((workspaceId) => redis.get(`workspace:${workspaceId}`)));
+  const records = await redis.mget(...ids.map((workspaceId) => `workspace:${workspaceId}`));
   return records.filter((workspace) => workspace?.ownerUserId === userId);
 }
 

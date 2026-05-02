@@ -6,6 +6,7 @@ const HISTORY_SAMPLE_LIMIT = 288;
 const INCIDENT_SAMPLE_LIMIT = 8;
 const MAX_HTML_BYTES = 160 * 1024;
 const EXTERNAL_FETCH_TIMEOUT_MS = 10_000;
+const GEMINI_TIMEOUT_MS = 20_000;
 
 export async function getMonitorAiReport(redis, workspaceId, monitorId) {
   return redis.get(getMonitorAiReportKey(workspaceId, monitorId));
@@ -390,11 +391,15 @@ function escapeRegex(text) {
 
 async function requestGeminiReport(env, promptInput) {
   const model = env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL;
-  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(env.GEMINI_API_KEY)}`;
+  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
   const prompt = buildGeminiPrompt(promptInput);
   const response = await fetch(endpoint, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    signal: AbortSignal.timeout(GEMINI_TIMEOUT_MS),
+    headers: {
+      "Content-Type": "application/json",
+      "X-goog-api-key": env.GEMINI_API_KEY,
+    },
     body: JSON.stringify({
       generationConfig: {
         responseMimeType: "application/json",

@@ -1,7 +1,8 @@
 import {
   buildBillingSummary,
   getFeatureFlags,
-  syncWorkspaceBillingFromRazorpay,
+  getWorkspaceBilling,
+  getWorkspaceOpenBillingSession,
 } from "./billing.js";
 
 const PERSONAL_WORKSPACE_PREFIX = "ws_";
@@ -161,9 +162,10 @@ async function countWorkspaceMembers(redis, workspaceId) {
 
 async function buildWorkspaceSummary(redis, workspace, userId) {
   if (!workspace?.id) return null;
-  const membership = workspace.ownerUserId === userId
-    ? await ensureWorkspaceMemberRecord(redis, workspace, userId, "owner")
-    : await getWorkspaceMembership(redis, workspace.id, userId);
+  let membership = await getWorkspaceMembership(redis, workspace.id, userId);
+  if (workspace.ownerUserId === userId && (!membership || membership.status !== ACTIVE_MEMBER_STATUS)) {
+    membership = await ensureWorkspaceMemberRecord(redis, workspace, userId, "owner");
+  }
   if (!membership || membership.status !== ACTIVE_MEMBER_STATUS) return null;
   const latestWorkspace = await redis.get(`workspace:${workspace.id}`) || workspace;
 
@@ -187,7 +189,10 @@ export async function ensureDefaultWorkspace(redis, userId, userEmail = "") {
       }
       await redis.lrem(`user:${userId}:workspaces`, 0, existing.id);
       await redis.lpush(`user:${userId}:workspaces`, existing.id);
-      await ensureWorkspaceMemberRecord(redis, existing, userId, "owner", { email: userEmail });
+      const existingMembership = await getWorkspaceMembership(redis, existing.id, userId);
+      if (!existingMembership || existingMembership.status !== ACTIVE_MEMBER_STATUS) {
+        await ensureWorkspaceMemberRecord(redis, existing, userId, "owner", { email: userEmail });
+      }
       return existing;
     }
   }
@@ -354,9 +359,10 @@ export async function resolveWorkspaceForUser(redis, userId, requestedWorkspaceI
     return { workspace: defaultWorkspace, membership };
   }
 
-  const membership = workspace.ownerUserId === userId
-    ? await ensureWorkspaceMemberRecord(redis, workspace, userId, "owner", { email: userEmail })
-    : await getWorkspaceMembership(redis, workspace.id, userId);
+  let membership = await getWorkspaceMembership(redis, workspace.id, userId);
+  if (workspace.ownerUserId === userId && (!membership || membership.status !== ACTIVE_MEMBER_STATUS)) {
+    membership = await ensureWorkspaceMemberRecord(redis, workspace, userId, "owner", { email: userEmail });
+  }
 
   if (!membership || membership.status !== ACTIVE_MEMBER_STATUS) {
     return null;
@@ -390,8 +396,11 @@ export async function buildBootstrapPayload(redis, auth, requestedWorkspaceId = 
       email: userEmail,
     });
   const workspaces = await listUserWorkspaces(redis, userId);
-  const billing = await syncWorkspaceBillingFromRazorpay(redis, currentWorkspace, env);
-  const billingSummary = buildBillingSummary(billing);
+  const billing = await getWorkspaceBilling(redis, currentWorkspace);
+  const checkoutSession = currentWorkspace?.type === "team"
+    ? null
+    : await getWorkspaceOpenBillingSession(redis, currentWorkspace.id);
+  const billingSummary = buildBillingSummary(billing, { checkoutSession });
   return {
     userId,
     email: userEmail,
@@ -428,9 +437,13 @@ async function ensureUniqueWorkspaceSlug(redis, baseSlug) {
 async function linkWorkspaceResources(redis, input) {
   const { ownerUserId, targetWorkspaceId, selectedMonitorIds } = input;
   const linkedMonitorIds = new Set();
+  const selectedKeys = selectedMonitorIds.map((monitorId) => `monitor:${monitorId}`);
+  const selectedMonitors = selectedKeys.length > 0 ? await redis.mget(...selectedKeys) : [];
+  const workspaceMonitorIds = [];
 
-  for (const monitorId of selectedMonitorIds) {
-    const monitor = await redis.get(`monitor:${monitorId}`);
+  for (let index = 0; index < selectedMonitorIds.length; index += 1) {
+    const monitorId = selectedMonitorIds[index];
+    const monitor = selectedMonitors[index];
     if (!monitor) {
       return { ok: false, error: "One or more selected monitors could not be found." };
     }
@@ -441,40 +454,21 @@ async function linkWorkspaceResources(redis, input) {
       return { ok: false, error: "Choose parent monitors only when creating a team workspace." };
     }
 
-    await linkMonitorBundle(redis, monitor, targetWorkspaceId);
+    workspaceMonitorIds.push(monitor.id);
     linkedMonitorIds.add(monitor.id);
-
     const childIds = await redis.lrange(`monitor:${monitor.id}:children`, 0, -1);
     for (const childId of Array.isArray(childIds) ? childIds : []) {
-      if (childId) linkedMonitorIds.add(childId);
+      if (!childId) continue;
+      workspaceMonitorIds.push(childId);
+      linkedMonitorIds.add(childId);
     }
+  }
+
+  if (workspaceMonitorIds.length > 0) {
+    await redis.rpush(getWorkspaceCollectionKey(targetWorkspaceId, "monitors"), ...new Set(workspaceMonitorIds));
   }
 
   return { ok: true, linkedMonitorIds: [...linkedMonitorIds] };
-}
-
-/**
- * Add a monitor (and its children) to the team workspace collection
- * WITHOUT changing its workspaceId. The monitor stays "owned" by its
- * original workspace but is now also visible in the team workspace.
- */
-async function linkMonitorBundle(redis, monitor, targetWorkspaceId) {
-  const bundleIds = [monitor.id];
-  const childIds = await redis.lrange(`monitor:${monitor.id}:children`, 0, -1);
-  for (const childId of Array.isArray(childIds) ? childIds : []) {
-    if (childId) bundleIds.push(childId);
-  }
-
-  for (const monitorId of bundleIds) {
-    const m = await redis.get(`monitor:${monitorId}`);
-    if (!m) continue;
-    // Add to team workspace collection (no workspaceId mutation)
-    await ensureWorkspaceMembership(redis, targetWorkspaceId, "monitors", monitorId);
-    // Set URL index for the team workspace so duplicate detection still works
-    if (m.url) {
-      await redis.set(`workspace:${targetWorkspaceId}:monitor_url:${m.url}`, monitorId);
-    }
-  }
 }
 
 /**

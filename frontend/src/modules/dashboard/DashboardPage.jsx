@@ -32,6 +32,7 @@ import PageLoader from "../../components/PageLoader";
 import { useAuth } from "../../context/AuthContext";
 import {
   fetchMonitorSummary,
+  fetchDashboardEvents,
   fetchMonitorsStream,
   createMonitor,
   deleteMonitor,
@@ -75,9 +76,11 @@ export default function DashboardPage() {
   const [monitors, setMonitors] = useState([]);
   const [monitorSummary, setMonitorSummary] = useState(null);
   const [history, setHistory] = useState({});
+  const [dashboardEvents, setDashboardEvents] = useState([]);
 
   // ── Loading state — each section independent ──────────────────────────────
   const [summaryLoading, setSummaryLoading] = useState(true);
+  const [eventsLoading, setEventsLoading] = useState(true);
   // monitorsLoading: true = haven't received first page yet
   const [monitorsLoading, setMonitorsLoading] = useState(true);
   // monitorsStreaming: true = still fetching more pages (after first batch shown)
@@ -116,6 +119,25 @@ export default function DashboardPage() {
       if (activeRef.current) setSummaryLoading(false);
     }
   }, [user, workspace?.id]);
+
+  const loadDashboardEvents = useCallback(async () => {
+    if (!user || !workspace?.id || isMemberView) {
+      setDashboardEvents([]);
+      setEventsLoading(false);
+      return;
+    }
+    setEventsLoading(true);
+    try {
+      const payload = await fetchDashboardEvents(user, { range, limit: 12 });
+      if (!activeRef.current) return;
+      setDashboardEvents(Array.isArray(payload?.items) ? payload.items : []);
+    } catch {
+      if (!activeRef.current) return;
+      setDashboardEvents([]);
+    } finally {
+      if (activeRef.current) setEventsLoading(false);
+    }
+  }, [isMemberView, range, user, workspace?.id]);
 
   // ── Load monitors list — streams page-by-page, showing each batch ─────────
   const loadMonitors = useCallback(async () => {
@@ -163,8 +185,8 @@ export default function DashboardPage() {
   useEffect(() => {
     if (!user || !workspace?.id) return;
     // Run in parallel — KPI bar is fast (~200ms), monitor list can be slow
-    Promise.all([loadMonitorSummary(), loadMonitors()]).catch(() => {});
-  }, [user, workspace?.id, loadMonitorSummary, loadMonitors]);
+    Promise.all([loadMonitorSummary(), loadMonitors(), loadDashboardEvents()]).catch(() => {});
+  }, [user, workspace?.id, loadMonitorSummary, loadMonitors, loadDashboardEvents]);
 
   // ── Lazy history fetch for comparison chart (skip for members) ───────────
   useEffect(() => {
@@ -204,6 +226,7 @@ export default function DashboardPage() {
       // Invalidate summary cache so KPIs refresh on next load
       invalidateMonitorSummaryCache(user.uid);
       loadMonitorSummary();
+      loadDashboardEvents();
     } catch {
       setError("Could not ping monitor. Is the Worker running?");
     } finally {
@@ -240,6 +263,7 @@ export default function DashboardPage() {
       }
       invalidateMonitorSummaryCache(user.uid);
       loadMonitorSummary();
+      loadDashboardEvents();
 
       try {
         const { monitor: updated, history: newEntry } = await triggerPingSingle(user, saved.id);
@@ -273,6 +297,7 @@ export default function DashboardPage() {
       setSelectedMonitorIds((prev) => prev.filter((item) => item !== id));
       invalidateMonitorSummaryCache(user.uid);
       loadMonitorSummary();
+      loadDashboardEvents();
     } catch {
       setError("Could not delete monitor. Please try again.");
     }
@@ -321,8 +346,8 @@ export default function DashboardPage() {
   );
 
   const recentSignals = useMemo(
-    () => buildRecentSignals(monitors, range),
-    [monitors, range]
+    () => buildRecentSignals(dashboardEvents, range),
+    [dashboardEvents, range]
   );
 
   const barData = useMemo(
@@ -343,10 +368,11 @@ export default function DashboardPage() {
   const monitorLimit = Number.isFinite(entitlements?.maxMonitors) ? entitlements.maxMonitors : null;
   const monitorCount = monitorSummary?.totalMonitors ?? monitors.filter((item) => item.type !== "child").length;
   const monitorLimitReached = monitorLimit != null && monitorCount >= monitorLimit;
+  const hasMonitors = Boolean(monitorSummary?.hasMonitors ?? monitors.some((item) => item.type !== "child"));
+  const coldLoading = summaryLoading && monitorsLoading;
 
   // ── Render ─────────────────────────────────────────────────────────────────
   // Show skeleton on cold load (both summary and first monitor batch pending)
-  if (summaryLoading && monitorsLoading) return <PageLoader rows={5} />;
   return (
     <div className="min-h-screen text-[#f2f2f2]">
         {/* Header */}
@@ -394,9 +420,34 @@ export default function DashboardPage() {
           {/* ── KPI Row — loads independently, as fast as the summary endpoint ── */}
           <KpiRow kpis={kpis} loading={summaryLoading && !monitorSummary} />
 
+          {coldLoading ? (
+            <PageLoader rows={4} />
+          ) : (
+            <>
+
+          {!hasMonitors && !monitorsLoading ? (
+            <section className="rounded-xl border border-dashed border-[#2b313c] bg-[#0f1217] px-5 py-10 text-center">
+              <h3 className="text-lg font-semibold text-white">No monitors yet</h3>
+              <p className="mt-2 text-sm text-[#8d94a0]">
+                Add your first monitor to start collecting uptime, response time, and status-change history.
+              </p>
+              {canManageMonitors ? (
+                <button
+                  type="button"
+                  onClick={() => setShowModal(true)}
+                  className="mt-5 h-10 px-4 rounded-lg bg-white text-black text-sm font-semibold inline-flex items-center gap-2"
+                >
+                  <Plus className="w-4 h-4" />
+                  Add Monitor
+                </button>
+              ) : null}
+            </section>
+          ) : null}
+
           {/* ── Charts & attention section (owner view only) ─────────────────── */}
           {!isMemberView ? (
-            <>
+            hasMonitors ? (
+              <>
               <section className="grid grid-cols-1 xl:grid-cols-3 gap-5">
                 {/* Response time chart */}
                 <div className="xl:col-span-2 bg-[#0f1217] border border-[#22252b] rounded-xl p-4 md:p-5">
@@ -656,7 +707,11 @@ export default function DashboardPage() {
                     </div>
                     <Activity className="w-4 h-4 text-[#7f8793]" />
                   </div>
-                  {recentSignals.length === 0 ? (
+                  {eventsLoading ? (
+                    <div className="rounded-lg border border-dashed border-[#2b313c] bg-[#11151c] px-4 py-8 text-center text-sm text-[#7f8793]">
+                      Loading recent monitor events...
+                    </div>
+                  ) : recentSignals.length === 0 ? (
                     <div className="rounded-lg border border-dashed border-[#2b313c] bg-[#11151c] px-4 py-8 text-center text-sm text-[#7f8793]">
                       No recent state shifts in this range.
                     </div>
@@ -687,7 +742,8 @@ export default function DashboardPage() {
                   )}
                 </div>
               </section>
-            </>
+              </>
+            ) : null
           ) : (
             <section className="bg-[#0f1217] border border-[#22252b] rounded-xl p-4 md:p-5">
               <div className="flex items-center gap-3">
@@ -762,6 +818,8 @@ export default function DashboardPage() {
               </div>
             )}
           </section>
+            </>
+          )}
         </div>
       {showModal && (
         <AddMonitorModal onClose={() => setShowModal(false)} onAdd={handleAddMonitor} />

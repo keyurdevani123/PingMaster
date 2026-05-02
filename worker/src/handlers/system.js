@@ -4,8 +4,12 @@ import { runCrawler } from "../services/crawler.js";
 import { checkEndpoint, runPinger } from "../services/monitoring.js";
 
 export async function pingNow(redis, env, corsHeaders) {
-  await runPinger(redis, env);
-  return json({ ok: true, message: "Pinger ran successfully" }, 200, corsHeaders);
+  const result = await runPinger(redis, env, { mode: "all" });
+  return json({
+    ok: true,
+    message: "Pinger ran successfully",
+    result,
+  }, 200, corsHeaders);
 }
 
 export async function pingDiagnostics(request, userId, corsHeaders) {

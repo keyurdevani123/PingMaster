@@ -6,6 +6,11 @@ import { invalidateWorkspaceStatusPageCaches } from "./statusPages.js";
 
 const SUMMARY_HISTORY_LIMIT = 288;
 const SUMMARY_WINDOW_MS = 24 * 60 * 60 * 1000;
+const DASHBOARD_EVENT_HISTORY_LIMIT = 500;
+const DISPLAYABLE_MONITOR_STATUSES = new Set(["UP", "DOWN", "UP_RESTRICTED", "MAINTENANCE"]);
+const PINGER_CURSOR_KEY = "monitor_pinger_cursor";
+const DEFAULT_SCHEDULED_PINGER_BATCH_SIZE = 4;
+const MAX_SCHEDULED_PINGER_BATCH_SIZE = 10;
 
 export async function validateMonitorCandidate(url) {
   try {
@@ -40,6 +45,7 @@ export async function pingMonitor(redis, monitor, env = {}, options = {}) {
     : await checkEndpoint(monitor.url);
 
   monitor.status = result.status;
+  monitor.lifecycleState = "active";
   monitor.lastChecked = result.timestamp;
   monitor.lastLatency = result.latency;
   monitor.lastStatusCode = result.statusCode;
@@ -69,7 +75,7 @@ export async function pingMonitor(redis, monitor, env = {}, options = {}) {
     ...nextSummary,
   });
   monitor.metrics24h = nextSummary;
-  if (previousStatus && previousStatus !== result.status) {
+  if (previousStatus && previousStatus !== result.status && isDisplayableMonitorStatus(previousStatus) && isDisplayableMonitorStatus(result.status)) {
     monitor.lastTransition = {
       from: previousStatus,
       to: result.status,
@@ -77,6 +83,7 @@ export async function pingMonitor(redis, monitor, env = {}, options = {}) {
       statusCode: result.statusCode ?? null,
       errorType: result.errorType || "",
     };
+    await appendWorkspaceMonitorEvent(redis, monitor, monitor.lastTransition);
   }
   await redis.set(`monitor:${monitor.id}`, monitor);
   await invalidateWorkspaceStatusPageCaches(redis, monitor.workspaceId || null);
@@ -103,6 +110,36 @@ export async function pingMonitor(redis, monitor, env = {}, options = {}) {
   }
 
   return { monitor, result, historyEntry };
+}
+
+export function isDisplayableMonitorStatus(status) {
+  return DISPLAYABLE_MONITOR_STATUSES.has(String(status || "").trim().toUpperCase());
+}
+
+export function normalizeMonitorStatusForDisplay(status) {
+  const normalized = String(status || "").trim().toUpperCase();
+  return isDisplayableMonitorStatus(normalized) ? normalized : null;
+}
+
+export async function getWorkspaceMonitorEvents(redis, workspaceId, options = {}) {
+  if (!workspaceId) return [];
+  const limit = Number.isFinite(options.limit) ? Math.max(1, Math.min(options.limit, 50)) : 12;
+  const range = String(options.range || "24h").toLowerCase() === "7d" ? "7d" : "24h";
+  const cutoff = range === "7d"
+    ? Date.now() - 7 * 24 * 60 * 60 * 1000
+    : Date.now() - 24 * 60 * 60 * 1000;
+
+  const items = await redis.lrange(getWorkspaceMonitorEventsKey(workspaceId), 0, DASHBOARD_EVENT_HISTORY_LIMIT - 1);
+  return Array.isArray(items)
+    ? items
+      .filter((entry) => {
+        const ts = new Date(entry?.timestamp).getTime();
+        if (!Number.isFinite(ts) || ts < cutoff) return false;
+        return isDisplayableMonitorStatus(entry?.from) && isDisplayableMonitorStatus(entry?.to);
+      })
+      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+      .slice(0, limit)
+    : [];
 }
 
 export function buildMonitorMetricsSummary(historyEntries) {
@@ -226,24 +263,82 @@ function getMonitorSummaryKey(monitorId) {
   return `monitor_summary:${monitorId}`;
 }
 
-export async function runPinger(redis, env) {
-  const ids = await getIndexedMonitorIds(redis);
-  if (!ids || ids.length === 0) return;
-  const alertRuntimeCache = createAlertRuntimeCache();
+function getWorkspaceMonitorEventsKey(workspaceId) {
+  return `workspace_monitor_events:${workspaceId}`;
+}
 
-  await Promise.all(
-    ids.map(async (id) => {
-      const monitor = await redis.get(`monitor:${id}`);
-      if (!monitor) return;
-      await pingMonitor(redis, monitor, env, { alertRuntimeCache });
-    })
-  );
+async function appendWorkspaceMonitorEvent(redis, monitor, transition) {
+  const workspaceId = monitor?.workspaceId;
+  if (!workspaceId || !transition) return;
+  const event = {
+    id: `${monitor.id}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
+    workspaceId,
+    monitorId: monitor.id,
+    monitorName: monitor.name || monitor.url || "Monitor",
+    from: String(transition.from || "").toUpperCase(),
+    to: String(transition.to || "").toUpperCase(),
+    timestamp: transition.timestamp || new Date().toISOString(),
+    statusCode: transition.statusCode ?? null,
+    errorType: transition.errorType || "",
+  };
+  await redis.lpush(getWorkspaceMonitorEventsKey(workspaceId), event);
+  await redis.ltrim(getWorkspaceMonitorEventsKey(workspaceId), 0, DASHBOARD_EVENT_HISTORY_LIMIT - 1);
+}
+
+export async function runPinger(redis, env, options = {}) {
+  const ids = await getIndexedMonitorIds(redis);
+  if (!ids || ids.length === 0) {
+    return {
+      mode: options.mode === "all" ? "all" : "scheduled",
+      totalIndexed: 0,
+      processedCount: 0,
+      processedMonitorIds: [],
+    };
+  }
+
+  const mode = options.mode === "all" ? "all" : "scheduled";
+  const batch = mode === "all"
+    ? {
+      ids,
+      startCursor: 0,
+      nextCursor: 0,
+      batchSize: ids.length,
+    }
+    : await getScheduledMonitorBatch(redis, ids, env, options.batchSize);
+  const alertRuntimeCache = createAlertRuntimeCache();
+  const processedMonitorIds = [];
+
+  for (const id of batch.ids) {
+    const monitor = await redis.get(`monitor:${id}`);
+    if (!monitor) continue;
+    await pingMonitor(redis, monitor, env, { alertRuntimeCache });
+    processedMonitorIds.push(id);
+  }
+
+  console.log("pinger_run_completed", {
+    mode,
+    totalIndexed: ids.length,
+    configuredBatchSize: batch.batchSize,
+    processedCount: processedMonitorIds.length,
+    startCursor: batch.startCursor,
+    nextCursor: batch.nextCursor,
+  });
+
+  return {
+    mode,
+    totalIndexed: ids.length,
+    configuredBatchSize: batch.batchSize,
+    processedCount: processedMonitorIds.length,
+    processedMonitorIds,
+    startCursor: batch.startCursor,
+    nextCursor: batch.nextCursor,
+  };
 }
 
 async function getIndexedMonitorIds(redis) {
   const indexed = await redis.smembers(MONITOR_INDEX_KEY);
   if (Array.isArray(indexed) && indexed.length > 0) {
-    return indexed;
+    return [...new Set(indexed.filter(Boolean))].sort();
   }
 
   const keys = await redis.keys("monitor:*");
@@ -255,7 +350,48 @@ async function getIndexedMonitorIds(redis) {
     await redis.sadd(MONITOR_INDEX_KEY, ...discoveredIds);
   }
 
-  return discoveredIds;
+  return [...new Set(discoveredIds)].sort();
+}
+
+function resolveScheduledPingerBatchSize(env, requestedBatchSize) {
+  const raw = requestedBatchSize ?? env?.PINGER_BATCH_SIZE ?? DEFAULT_SCHEDULED_PINGER_BATCH_SIZE;
+  const parsed = Number.parseInt(String(raw), 10);
+  if (!Number.isFinite(parsed)) return DEFAULT_SCHEDULED_PINGER_BATCH_SIZE;
+  return Math.max(1, Math.min(parsed, MAX_SCHEDULED_PINGER_BATCH_SIZE));
+}
+
+async function getScheduledMonitorBatch(redis, ids, env, requestedBatchSize) {
+  const safeIds = Array.isArray(ids) ? ids.filter(Boolean) : [];
+  if (safeIds.length === 0) {
+    return {
+      ids: [],
+      startCursor: 0,
+      nextCursor: 0,
+      batchSize: 0,
+    };
+  }
+
+  const configuredBatchSize = resolveScheduledPingerBatchSize(env, requestedBatchSize);
+  const batchSize = Math.min(configuredBatchSize, safeIds.length);
+  const rawCursor = Number.parseInt(String((await redis.get(PINGER_CURSOR_KEY)) ?? 0), 10);
+  const startCursor = Number.isFinite(rawCursor) && rawCursor >= 0
+    ? rawCursor % safeIds.length
+    : 0;
+
+  const batchIds = [];
+  for (let index = 0; index < batchSize; index += 1) {
+    batchIds.push(safeIds[(startCursor + index) % safeIds.length]);
+  }
+
+  const nextCursor = (startCursor + batchIds.length) % safeIds.length;
+  await redis.set(PINGER_CURSOR_KEY, nextCursor);
+
+  return {
+    ids: batchIds,
+    startCursor,
+    nextCursor,
+    batchSize: configuredBatchSize,
+  };
 }
 
 function sleep(ms) {

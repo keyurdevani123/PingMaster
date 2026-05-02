@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Check, ChevronDown, Crown, Info, Mail, Plus, RefreshCw, Shield, Trash2, Users, X } from "lucide-react";
+import { Check, ChevronDown, Crown, Info, Mail, Plus, Shield, Trash2, Users, X } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import PageLoader from "../../components/PageLoader";
 import { useAuth } from "../../context/AuthContext";
@@ -8,7 +8,6 @@ import {
   createTeamInvite,
   createTeamWorkspace,
   deleteTeamWorkspace,
-  fetchBilling,
   fetchMonitors,
   fetchTeamInvites,
   fetchTeamMembers,
@@ -38,7 +37,6 @@ export default function WorkspacesPage() {
   const [members, setMembers] = useState([]);
   const [invites, setInvites] = useState([]);
   const [loading, setLoading] = useState(false);
-  const [refreshing, setRefreshing] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [accepting, setAccepting] = useState(false);
   const [error, setError] = useState("");
@@ -78,11 +76,9 @@ export default function WorkspacesPage() {
       setMembers([]);
       setInvites([]);
       setLoading(false);
-      setRefreshing(false);
       return;
     }
-    if (silent) setRefreshing(true);
-    else setLoading(true);
+    if (!silent) setLoading(true);
     setError("");
     try {
       const [memberItems, inviteItems] = await Promise.all([fetchTeamMembers(user), fetchTeamInvites(user)]);
@@ -92,7 +88,6 @@ export default function WorkspacesPage() {
       setError(err?.message || "Could not load workspace collaboration details.");
     } finally {
       setLoading(false);
-      setRefreshing(false);
     }
   }, [isTeamWorkspace, user, workspace?.id]);
 
@@ -118,27 +113,6 @@ export default function WorkspacesPage() {
   useEffect(() => {
     setWorkspaceBilling(billing || null);
   }, [billing]);
-
-  useEffect(() => {
-    let active = true;
-
-    async function loadWorkspaceBilling() {
-      if (!user || !workspace?.id) return;
-      try {
-        const payload = await fetchBilling(user, { force: true });
-        if (!active) return;
-        setWorkspaceBilling(payload?.billing || null);
-      } catch {
-        if (!active) return;
-        setWorkspaceBilling(billing || null);
-      }
-    }
-
-    loadWorkspaceBilling();
-    return () => {
-      active = false;
-    };
-  }, [billing, user, workspace?.id]);
 
   async function handleAcceptInvite() {
     if (!inviteId) return;
@@ -274,8 +248,6 @@ export default function WorkspacesPage() {
     if (workspaceMonitors.length === 0 && !workspaceMonitorsLoading) await loadWorkspaceMonitors();
   }
 
-  if (loading) return <PageLoader />;
-
   return (
     <div className="min-h-screen bg-[#08090b] text-[#f2f2f2]">
       <header className="border-b border-[#1a1d24] bg-[#0d0f13]">
@@ -292,10 +264,6 @@ export default function WorkspacesPage() {
                 Create Workspace
               </button>
             )}
-            <button type="button" onClick={() => loadTeamData({ silent: true })} disabled={refreshing || workspaceSwitching} className="h-10 px-4 rounded-lg border border-[#252a33] bg-[#14181e] text-sm inline-flex items-center gap-2 disabled:opacity-50">
-              <RefreshCw className={`w-4 h-4 ${(refreshing || workspaceSwitching) ? "animate-spin" : ""}`} />
-              {workspaceSwitching ? "Switching..." : refreshing ? "Refreshing..." : "Refresh"}
-            </button>
             <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-2">
               {/* <div>
                 <p className="text-[11px] uppercase tracking-[0.08em] text-[#8d94a0]">Role Guide</p>
@@ -314,6 +282,10 @@ export default function WorkspacesPage() {
 
       <div className="max-w-7xl mx-auto px-6 md:px-8 py-8 xl:flex xl:items-start xl:gap-6">
         <div className="flex-1 space-y-6">
+          {loading ? (
+            <PageLoader rows={5} />
+          ) : (
+            <>
           {inviteId && (
             <section className="bg-sky-500/10 border border-sky-500/25 rounded-xl p-4 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
               <div>
@@ -516,9 +488,9 @@ export default function WorkspacesPage() {
                 <section className="bg-[#0f1217] border border-[#22252b] rounded-xl p-5">
                   <h2 className="text-lg font-semibold text-white">Pending Invites</h2>
                   <div className="mt-4 space-y-3">
-                    {loading ? (
-                      <div className="rounded-lg border border-[#252a33] bg-[#14181e] px-4 py-4 text-sm text-[#8d94a0]">Loading invites...</div>
-                    ) : activeInvites.length > 0 ? activeInvites.map((invite) => (
+                  {loading ? (
+                    <div className="rounded-lg border border-[#252a33] bg-[#14181e] px-4 py-4 text-sm text-[#8d94a0]">Loading invites...</div>
+                  ) : activeInvites.length > 0 ? activeInvites.map((invite) => (
                       <div key={invite.id} className="rounded-lg border border-[#252a33] bg-[#14181e] px-4 py-3 flex items-start justify-between gap-3">
                         <div className="min-w-0">
                           <p className="text-sm font-medium text-[#edf2fb] break-all">{invite.email}</p>
@@ -533,19 +505,28 @@ export default function WorkspacesPage() {
                 </section>
               </div>
             </div>
-          ) : null}
+            ) : null}
+            </>
+          )}
         </div>
 
       </div>
 
       {showRoleGuide && (
-        <div className="pointer-events-none fixed inset-y-0 right-0 z-50 flex w-full justify-end p-3 sm:p-5">
-          <aside className="pointer-events-auto h-full w-full max-w-md overflow-y-auto rounded-2xl border border-[#252a33] bg-[#0f1217] shadow-[0_20px_60px_rgba(0,0,0,0.45)]">
+        <div
+          className="fixed inset-0 z-50 bg-black/45 flex justify-end p-3 sm:p-5"
+          onClick={() => setShowRoleGuide(false)}
+        >
+          <aside
+            className="h-full w-full max-w-md overflow-y-auto rounded-2xl border border-[#252a33] bg-[#0f1217] shadow-[0_20px_60px_rgba(0,0,0,0.45)]"
+            onClick={(event) => event.stopPropagation()}
+          >
             <div className="sticky top-0 border-b border-[#22252b] bg-[#0f1217] px-5 py-4">
               <div className="flex items-start justify-between gap-3">
                 <div>
                   {/* <p className="text-[11px] uppercase tracking-[0.08em] text-[#8d94a0]">Role Guide</p> */}
                   <h2 className="mt-2 text-lg font-semibold text-white">Role Guide</h2>
+                  <p className="mt-2 text-sm text-[#8d94a0]">Choose the right level of access before you invite anyone into a shared workspace.</p>
                   {/* <p className="mt-2 text-sm text-[#8d94a0]">This panel stays above the page without blurring the background.</p> */}
                 </div>
                 <button type="button" onClick={() => setShowRoleGuide(false)} className="h-8 w-8 rounded-lg border border-[#252a33] bg-[#14181e] grid place-items-center shrink-0">

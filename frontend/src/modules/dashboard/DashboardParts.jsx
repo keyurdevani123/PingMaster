@@ -157,10 +157,11 @@ export function InfraRowSkeleton() {
 // ── Monitor infra row ─────────────────────────────────────────────────────────
 export function InfraRow({ monitor, stats, onOpen, onPing, onDelete, isBusy }) {
   const [pendingDelete, setPendingDelete] = useState(false);
-  const status = getStatusMeta(monitor.status);
+  const status = getStatusMeta(monitor.displayStatus || monitor.status);
   const uptimeValue = stats?.uptime24h ?? "--";
   const responseValue = monitor.lastLatency != null ? `${monitor.lastLatency} ms` : "n/a";
   const statusCode = monitor.lastStatusCode ?? "n/a";
+  const lastCheckedLabel = monitor.lastChecked ? `Last checked ${formatRelativeTime(monitor.lastChecked)}` : "Waiting for first check";
 
   return (
     <div className="relative">
@@ -177,7 +178,7 @@ export function InfraRow({ monitor, stats, onOpen, onPing, onDelete, isBusy }) {
             : "hover:bg-[#161b23] transition"
         }`}
       >
-        <div className="min-w-0">
+        <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <span className={`w-2 h-2 rounded-full shrink-0 ${status.dotClass}`} />
             <p className="font-medium text-base text-[#edf2fb] truncate">{monitor.name}</p>
@@ -185,23 +186,23 @@ export function InfraRow({ monitor, stats, onOpen, onPing, onDelete, isBusy }) {
               {status.label}
             </span>
           </div>
-          <p className="text-sm text-[#8d94a0] truncate mt-1">{monitor.url}</p>
+          <p className="hidden sm:block text-sm text-[#8d94a0] truncate mt-1">{monitor.url}</p>
           <p className="text-xs text-[#6f7785] mt-1">
-            Last checked {formatRelativeTime(monitor.lastChecked)} | 24h uptime{" "}
+            {lastCheckedLabel} | 24h uptime{" "}
             {stats?.uptime24h != null ? `${stats.uptime24h}%` : "--"}
           </p>
         </div>
 
-        <div className="flex items-center gap-2 md:gap-3 shrink-0">
-          <div className="text-right mr-1">
+        <div className="grid w-full grid-cols-2 gap-2 md:flex md:w-auto md:items-center md:gap-3 shrink-0">
+          <div className="rounded-lg border border-[#252a33] bg-[#11151c] px-3 py-2 text-left md:border-0 md:bg-transparent md:px-0 md:py-0 md:text-right md:mr-1">
             <p className="text-sm uppercase tracking-[0.08em] text-[#6f7785]">Response</p>
             <p className="text-lg font-medium text-[#d8dee9]">{responseValue}</p>
           </div>
-          <div className="text-right mr-1">
+          <div className="rounded-lg border border-[#252a33] bg-[#11151c] px-3 py-2 text-left sm:block md:border-0 md:bg-transparent md:px-0 md:py-0 md:text-right md:mr-1">
             <p className="text-sm uppercase tracking-[0.08em] text-[#6f7785]">Status Code</p>
             <p className="text-lg font-medium text-[#d8dee9]">{statusCode}</p>
           </div>
-          <div className="text-right mr-1 hidden lg:block">
+          <div className="hidden lg:block text-right mr-1">
             <p className="text-sm uppercase tracking-[0.08em] text-[#6f7785]">24h Uptime</p>
             <p className="text-lg font-medium text-[#d8dee9]">
               {uptimeValue !== "--" ? `${uptimeValue}%` : "--"}
@@ -213,7 +214,7 @@ export function InfraRow({ monitor, stats, onOpen, onPing, onDelete, isBusy }) {
               event.stopPropagation();
               onPing(monitor.id);
             }}
-            className="h-9 px-3 rounded-md border border-[#2b313c] text-[#ced5e0] text-base hover:bg-[#171c25] transition"
+            className="h-10 px-3 rounded-md border border-[#2b313c] text-[#ced5e0] text-sm md:text-base hover:bg-[#171c25] transition"
           >
             {isBusy ? "Pinging…" : "Ping"}
           </button>
@@ -223,7 +224,7 @@ export function InfraRow({ monitor, stats, onOpen, onPing, onDelete, isBusy }) {
               event.stopPropagation();
               setPendingDelete(true);
             }}
-            className="h-9 w-9 rounded-md border border-[#2b313c] grid place-items-center text-[#ef9f90] hover:bg-[#21171a] transition"
+            className="h-10 w-full md:w-9 rounded-md border border-[#2b313c] grid place-items-center text-[#ef9f90] hover:bg-[#21171a] transition"
             title="Delete monitor"
           >
             <Trash2 className="w-3.5 h-3.5" />

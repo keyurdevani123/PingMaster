@@ -53,7 +53,7 @@ const SEVERITY_OPTIONS = [
 ];
 
 export default function IncidentDetails() {
-  const { user, logout, currentMembershipRole, workspace } = useAuth();
+  const { user, currentMembershipRole, workspace } = useAuth();
   const navigate = useNavigate();
   const { incidentId } = useParams();
 
@@ -267,9 +267,6 @@ export default function IncidentDetails() {
               <RefreshCw className={`w-4 h-4 ${refreshing ? "animate-spin" : ""}`} />
               {refreshing ? "Refreshing..." : "Refresh"}
             </button>
-            <button type="button" onClick={logout} className="h-10 px-3 rounded-lg border border-[#252a33] bg-[#14181e] text-[#d4dae4] text-sm">
-              Logout
-            </button>
           </div>
         </header>
 
@@ -366,7 +363,7 @@ export default function IncidentDetails() {
                     caption={normalizedIncident.resolvedAt ? "Incident resolution time" : "This incident is still active"}
                   />
                   <InfoPanel label="Duration" value={normalizedIncident.durationLabel} />
-                  <InfoPanel label="Assigned To" value={formatAssignedLabel(normalizedIncident.assignedToUserId)} />
+                  <InfoPanel label="Assigned To" value={formatAssignedLabel(normalizedIncident)} />
                   <InfoPanel
                     label="Assigned At"
                     value={normalizedIncident.assignedAt ? formatTimestamp(normalizedIncident.assignedAt) : "Not assigned"}
@@ -409,6 +406,7 @@ export default function IncidentDetails() {
                     <TimelineEntry
                       key={entry.id || `${entry.createdAt}-${index}`}
                       entry={entry}
+                      incident={normalizedIncident}
                       isLast={index === normalizedIncident.updates.length - 1}
                     />
                   ))
@@ -709,20 +707,21 @@ function InfoPanel({ label, value }) {
   );
 }
 
-function TimelineEntry({ entry, isLast }) {
+function TimelineEntry({ entry, incident, isLast }) {
   const isSystem = entry.type === "system";
+  const display = buildTimelineDisplay(entry, incident);
   const actorLabel = formatTimelineActorLabel(entry.actorName || entry.actorEmail || entry.actorUserId || "");
   return (
     <div className="relative pl-8">
       {!isLast && <div className="absolute left-[11px] top-7 h-[calc(100%-1rem)] w-px bg-[#2d3340]" />}
       <div className={`absolute left-0 top-1.5 h-6 w-6 rounded-full border ${isSystem ? "border-[#6e86ff] bg-[#1d2847]" : "border-[#2aab79] bg-[#123528]"}`} />
-      <div className="rounded-xl border border-[#252a33] bg-[#10141b] p-4 shadow-[0_10px_30px_rgba(0,0,0,0.18)]">
-        <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="rounded-xl border border-[#252a33] bg-[#10141b] p-4 shadow-[0_10px_30px_rgba(0,0,0,0.18)]">
+          <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <p className="text-sm font-medium text-[#edf2fb]">{entry.title || "Response entry"}</p>
+            <p className="text-sm font-medium text-[#edf2fb]">{display.title}</p>
             <div className="flex flex-wrap items-center gap-2 mt-2">
               <span className={`text-[11px] uppercase tracking-[0.08em] px-2 py-1 rounded ${isSystem ? "bg-[#1d2847] text-[#bbccff]" : "bg-[#123528] text-[#98f0c7]"}`}>
-                {isSystem ? "System update" : "Team response"}
+                {isSystem ? "Timeline event" : "Team response"}
               </span>
               <span className="text-xs text-[#8d94a0]">
                 by {actorLabel}
@@ -733,10 +732,89 @@ function TimelineEntry({ entry, isLast }) {
             {formatTimestamp(entry.createdAt)}
           </div>
         </div>
-        {entry.body && <p className="text-sm leading-6 text-[#d7dee9] mt-3 whitespace-pre-wrap">{entry.body}</p>}
+        {display.body ? <p className="text-sm leading-6 text-[#d7dee9] mt-3 whitespace-pre-wrap">{display.body}</p> : null}
+        {display.note ? <p className="text-xs leading-5 text-[#8d94a0] mt-3 whitespace-pre-wrap">{display.note}</p> : null}
       </div>
     </div>
   );
+}
+
+function buildTimelineDisplay(entry, incident) {
+  const title = String(entry?.title || "").trim();
+  const body = String(entry?.body || "").trim();
+  const assignedLabel = formatAssignedLabel(incident);
+
+  if (entry?.type !== "system") {
+    return {
+      title: title || "Response note",
+      body,
+      note: "",
+    };
+  }
+
+  if (title === "Incident opened" || title === "Incident created") {
+    return {
+      title: "Incident opened",
+      body: `A new incident was opened for ${incident?.monitorName || "this monitor"}.`,
+      note: incident?.impactSummary ? `Impact summary: ${incident.impactSummary}` : "",
+    };
+  }
+
+  if (title === "Ownership assigned" || title === "Incident assigned" || title === "Ownership updated") {
+    return {
+      title: "Ownership assigned",
+      body: `Assigned to ${assignedLabel}.`,
+      note: "",
+    };
+  }
+
+  if (title === "Ownership removed" || title === "Incident unassigned") {
+    return {
+      title: "Ownership removed",
+      body: "This incident is currently unassigned.",
+      note: "",
+    };
+  }
+
+  if (title === "Incident details updated") {
+    return {
+      title: "Incident details updated",
+      body: "The incident summary, severity, or investigation details were updated.",
+      note: "",
+    };
+  }
+
+  if (title === "Incident acknowledged") {
+    return {
+      title: "Incident acknowledged",
+      body: "The team acknowledged the issue and started active investigation.",
+      note: "",
+    };
+  }
+
+  if (title === "Incident resolved") {
+    return {
+      title: "Incident resolved",
+      body: incident?.fixSummary
+        ? `Marked resolved after this fix: ${incident.fixSummary}`
+        : "The issue was resolved and service returned to normal.",
+      note: incident?.resolutionNotes ? `Resolution notes: ${incident.resolutionNotes}` : "",
+    };
+  }
+
+  if (title === "Incident reopened") {
+    return {
+      title: "Incident reopened",
+      body: "The incident was reopened for more investigation or follow-up work.",
+      note: "",
+    };
+  }
+
+  return {
+    title: title || "System update",
+    body,
+    note: "",
+  };
 }
 
 function formatTimelineActorLabel(value) {
@@ -745,8 +823,13 @@ function formatTimelineActorLabel(value) {
   return text;
 }
 
-function formatAssignedLabel(value) {
-  const text = String(value || "").trim();
+function formatAssignedLabel(incident) {
+  const label = incident?.assignedToMember?.displayName
+    || incident?.assignedToMember?.email
+    || incident?.assignedToLabel
+    || incident?.assignedToUserId
+    || "";
+  const text = String(label || "").trim();
   if (!text) return "Unassigned";
   return text;
 }

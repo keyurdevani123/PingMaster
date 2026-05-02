@@ -186,6 +186,24 @@ export async function fetchMonitorSummary(user) {
   return payload;
 }
 
+export async function fetchDashboardEvents(user, options = {}) {
+  const range = String(options.range || "24h").toLowerCase() === "7d" ? "7d" : "24h";
+  const limit = Number.isFinite(options.limit) ? Math.max(1, Math.min(options.limit, 50)) : 12;
+  const cacheKey = `dashboard-events:${user.uid}:${getWorkspaceCacheScope()}:${range}:${limit}`;
+  const cached = readApiCache(cacheKey, DASHBOARD_SUMMARY_CACHE_TTL_MS);
+  if (cached) return cached;
+
+  const endpoint = new URL(`${WORKER_URL}/dashboard/events`);
+  endpoint.searchParams.set("range", range);
+  endpoint.searchParams.set("limit", String(limit));
+
+  const res = await fetch(endpoint.toString(), { headers: await authHeaders(user) });
+  if (!res.ok) throw new Error("Failed to fetch dashboard events");
+  const payload = await res.json();
+  writeApiCache(cacheKey, payload);
+  return payload;
+}
+
 // ── GET /monitors (paginated) ─────────────────
 export async function fetchMonitorsPage(user, options = {}) {
   const includeChildren = options.includeChildren === true;
@@ -403,6 +421,20 @@ export async function verifyBillingSubscription(user, payload) {
   const result = await res.json().catch(() => ({}));
   if (!res.ok) {
     throw new Error(result?.error || "Failed to verify billing payment");
+  }
+  clearApiCache();
+  return result;
+}
+
+export async function cancelBillingCheckout(user, payload = {}) {
+  const res = await fetch(`${WORKER_URL}/billing/cancel`, {
+    method: "POST",
+    headers: await authHeaders(user),
+    body: JSON.stringify(payload),
+  });
+  const result = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(result?.error || "Failed to cancel billing checkout");
   }
   clearApiCache();
   return result;
@@ -1259,13 +1291,14 @@ function invalidateUserApiCache(userId, monitorId) {
     // Previously, monitor-summary keys were never swept on add/delete/ping,
     // causing KPI cards to show stale values for up to 2 full minutes.
     const isMonitorSummary = key.startsWith(`monitor-summary:`);
+    const isDashboardEvents = key.startsWith("dashboard-events:");
     const isMonitorList = key.startsWith(`monitors:${userId}`);
     const isMonitorWorkspace = key.startsWith(`monitor-workspace:`);
     const isGeneralUserKey = key.includes(`:${userId}`);
-    if (monitorId && !isMonitorSummary && !isMonitorList && !isMonitorWorkspace) {
+    if (monitorId && !isMonitorSummary && !isDashboardEvents && !isMonitorList && !isMonitorWorkspace) {
       if (!key.includes(`:${monitorId}`)) continue;
     }
-    if (!isMonitorSummary && !isMonitorList && !isMonitorWorkspace && !isGeneralUserKey) continue;
+    if (!isMonitorSummary && !isDashboardEvents && !isMonitorList && !isMonitorWorkspace && !isGeneralUserKey) continue;
     apiCache.delete(key);
     try {
       localStorage.removeItem(`api-cache:${key}`);

@@ -59,7 +59,7 @@ const SEVERITY_OPTIONS = [
 const DEFERRED_INCIDENT_MONITOR_LOAD_MS = 900;
 
 export default function Incidents() {
-  const { user, logout, currentMembershipRole, workspace } = useAuth();
+  const { user, currentMembershipRole, workspace } = useAuth();
   const navigate = useNavigate();
 
   const [monitors, setMonitors] = useState([]);
@@ -185,11 +185,17 @@ export default function Incidents() {
     return incidents
       .map((incident, index) => {
         const monitor = incident.monitorId ? monitorMap[incident.monitorId] : null;
+        const assignedLabel = incident.assignedToMember?.displayName
+          || incident.assignedToMember?.email
+          || incident.assignedToLabel
+          || incident.assignedToUserId
+          || "Unassigned";
         return {
           ...incident,
           incidentCode: incident.code || `INC-${String(index + 1).padStart(4, "0")}`,
           monitorName: monitor?.name || incident.monitorName || "Unknown monitor",
           monitorUrl: monitor?.url || incident.monitorUrl || "",
+          assignedLabel,
           durationLabel: formatDuration(incident.startedAt, incident.resolvedAt),
           startedAgoLabel: formatRelativeTime(incident.startedAt),
           causeCode: inferCauseCode(incident),
@@ -389,12 +395,6 @@ export default function Incidents() {
     }
   }
 
-  if (loading) {
-    return (
-      <PageLoader />
-    );
-  }
-
   return (
     <div className="min-h-screen text-[#f2f2f2]">
         <header className="sticky top-0 z-20 border-b border-[#22252b] bg-[#0d0f13] px-5 md:px-8 py-3 flex items-center justify-between gap-4">
@@ -425,6 +425,10 @@ export default function Incidents() {
         </header>
 
         <div className="max-w-7xl mx-auto px-5 md:px-8 py-6 space-y-6">
+          {loading ? (
+            <PageLoader rows={5} />
+          ) : (
+            <>
           <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-4">
             <div>
               <p className="text-[11px] uppercase tracking-[0.08em] text-[#8d94a0]">Manual Incidents</p>
@@ -532,6 +536,8 @@ export default function Incidents() {
               ))
             )}
           </section>
+            </>
+          )}
         </div>
 
       {showCreateModal && (
@@ -651,9 +657,9 @@ function IncidentCard({
             <div className="rounded-lg border border-[#252a33] bg-[#10141b] px-3 py-2">
               Opened: {formatTimestamp(incident.startedAt)}
             </div>
-            <div className="rounded-lg border border-[#252a33] bg-[#10141b] px-3 py-2">
-              Assigned: {incident.assignedToUserId || "Unassigned"}
-            </div>
+              <div className="rounded-lg border border-[#252a33] bg-[#10141b] px-3 py-2">
+              Assigned: {incident.assignedLabel || "Unassigned"}
+              </div>
             <div className="rounded-lg border border-[#252a33] bg-[#10141b] px-3 py-2">
               Ack: {incident.acknowledgedAt ? formatTimestamp(incident.acknowledgedAt) : "Pending"}
             </div>
@@ -683,7 +689,7 @@ function IncidentCard({
               onClick={onOpenEdit}
               className="h-10 px-4 rounded-lg border border-[#2a2f39] bg-[#14181e] text-[#d4dae4] text-sm"
             >
-              Edit
+              {incident.assignedToUserId ? "Edit / Reassign" : "Edit / Assign"}
             </button>
           )}
 

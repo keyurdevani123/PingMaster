@@ -1,15 +1,21 @@
 import { json } from "../lib/http.js";
 import {
-  applyRazorpaySubscriptionToWorkspace,
   buildBillingSummary,
+  clearWorkspaceOpenBillingSession,
   createRazorpayOrder,
   fetchRazorpayPayment,
-  fetchRazorpaySubscription,
+  getBillingCheckoutSession,
   getBillingPlanConfig,
   getRazorpayMode,
+  getWorkspaceBilling,
+  getWorkspaceOpenBillingSession,
   isRazorpayConfigured,
   isPaidBillingStatus,
+  isPendingCheckoutSessionState,
+  mergeBillingCheckoutSession,
   mergeWorkspaceBilling,
+  saveBillingCheckoutSession,
+  setWorkspaceOpenBillingSession,
   syncWorkspaceBillingFromRazorpay,
   verifyRazorpayOrderSignature,
   applyRazorpayPaymentToWorkspace,
@@ -18,6 +24,7 @@ import {
 import { getPlanUsageSnapshot } from "../services/planUsage.js";
 
 const ACTIONABLE_PAYMENT_EVENTS = new Set([
+  "payment.authorized",
   "payment.captured",
   "payment.failed",
 ]);
@@ -43,6 +50,27 @@ function getRazorpaySubscriptionWorkspaceKey(subscriptionId) {
   return `razorpay_subscription_workspace:${subscriptionId}`;
 }
 
+function buildCheckoutResponse(env, auth, workspace, session) {
+  const plan = getBillingPlanConfig(session?.requestedPlan);
+  return {
+    key: env.RAZORPAY_KEY_ID,
+    orderId: session.orderId,
+    amount: session.amount,
+    currency: session.currency || "INR",
+    name: "PingMaster",
+    description: `PingMaster ${plan.label} one-time payment`,
+    prefill: {
+      name: auth?.name || "",
+      email: auth?.email || "",
+    },
+    notes: {
+      workspaceId: workspace.id,
+      workspaceName: workspace.name || "Workspace",
+      planCode: session.requestedPlan,
+    },
+  };
+}
+
 export async function getBillingHandler(request, redis, auth, workspace, membership, env, corsHeaders) {
   if (!workspace?.id || !membership) {
     return json({ error: "Forbidden" }, 403, corsHeaders);
@@ -50,9 +78,11 @@ export async function getBillingHandler(request, redis, auth, workspace, members
 
   const isTeamWorkspace = workspace?.type === "team";
   const billing = await syncWorkspaceBillingFromRazorpay(redis, workspace, env);
+  const checkoutSession = isTeamWorkspace ? null : await getWorkspaceOpenBillingSession(redis, workspace.id);
   const usage = isTeamWorkspace ? null : await getPlanUsageSnapshot(redis, auth.userId);
   return json({
     billing: buildBillingSummary(billing, {
+      checkoutSession,
       checkoutReady: isRazorpayConfigured(env) && membership?.role === "owner" && !isTeamWorkspace,
       mode: getRazorpayMode(env),
       manageable: membership?.role === "owner" && !isTeamWorkspace,
@@ -87,28 +117,64 @@ export async function postBillingSubscribe(request, redis, auth, workspace, memb
   const existingBilling = await syncWorkspaceBillingFromRazorpay(redis, workspace, env);
   const requestedPlanCode = typeof body?.plan === "string" ? body.plan.trim().toLowerCase() : "";
   const requestedPlan = getBillingPlanConfig(requestedPlanCode);
+  if (requestedPlanCode !== "plus" && requestedPlanCode !== "pro") {
+    return json({ error: "Select Plus or Pro to start checkout." }, 400, corsHeaders);
+  }
   if (requestedPlan.code !== "free" && existingBilling.plan === requestedPlan.code && isPaidBillingStatus(existingBilling.status)) {
     return json({ error: `${requestedPlan.label} is already active for this workspace.` }, 409, corsHeaders);
   }
-  if (requestedPlan.code !== "free" && existingBilling.pendingPlan === requestedPlan.code && existingBilling.orderId) {
-    return json({
-      error: `${requestedPlan.label} checkout is already in progress for this workspace. Refresh once before starting another checkout.`,
-    }, 409, corsHeaders);
+
+  const openSession = await getWorkspaceOpenBillingSession(redis, workspace.id);
+  if (openSession && isPendingCheckoutSessionState(openSession.state)) {
+    if (openSession.requestedPlan === requestedPlan.code) {
+      return json({
+        billing: buildBillingSummary(existingBilling, {
+          checkoutSession: openSession,
+          checkoutReady: true,
+          mode: getRazorpayMode(env),
+          manageable: true,
+          workspaceType: workspace?.type || "personal",
+        }),
+        checkout: buildCheckoutResponse(env, auth, workspace, openSession),
+        reused: true,
+      }, 200, corsHeaders);
+    }
+
+    await mergeBillingCheckoutSession(redis, openSession.orderId, {
+      state: "cancelled",
+      reason: "superseded_by_new_checkout",
+      lastEventType: "checkout.superseded",
+    });
+    await clearWorkspaceOpenBillingSession(redis, workspace.id, openSession.orderId);
   }
 
   try {
     const order = await createRazorpayOrder(env, workspace, auth, body);
     const planCode = typeof order?.notes?.plan_code === "string" ? order.notes.plan_code : (typeof body?.plan === "string" ? body.plan.trim().toLowerCase() : "");
     const plan = getBillingPlanConfig(planCode);
+    const savedSession = await saveBillingCheckoutSession(redis, order.id, {
+      orderId: order.id,
+      workspaceId: workspace.id,
+      requestedPlan: plan.code,
+      previousPlan: existingBilling.plan,
+      state: "created",
+      amount: order.amount,
+      currency: order.currency || "INR",
+      receipt: order.receipt || null,
+      paymentId: null,
+      reason: "",
+      createdAt: new Date().toISOString(),
+    });
+    await setWorkspaceOpenBillingSession(redis, workspace.id, order.id);
     const savedBilling = await mergeWorkspaceBilling(redis, workspace.id, {
       provider: "razorpay",
       plan: existingBilling.plan,
-      pendingPlan: plan.code,
-      status: "created",
-      orderId: order?.id || null,
-      paymentId: null,
-      subscriptionId: null,
+      pendingPlan: null,
+      status: existingBilling.status,
       customerId: auth?.email || null,
+      orderId: null,
+      paymentId: existingBilling.paymentId || null,
+      subscriptionId: null,
       razorpayPlanId: null,
     });
     if (order?.id) {
@@ -122,32 +188,59 @@ export async function postBillingSubscribe(request, redis, auth, workspace, memb
     }
     return json({
       billing: buildBillingSummary(savedBilling, {
+        checkoutSession: savedSession,
         checkoutReady: true,
         mode: getRazorpayMode(env),
         manageable: true,
         workspaceType: workspace?.type || "personal",
       }),
-      checkout: {
-        key: env.RAZORPAY_KEY_ID,
-        orderId: order.id,
-        amount: order.amount,
-        currency: order.currency || "INR",
-        name: "PingMaster",
-        description: `PingMaster ${plan.label} one-time payment`,
-        prefill: {
-          name: auth?.name || "",
-          email: auth?.email || "",
-        },
-        notes: {
-          workspaceId: workspace.id,
-          workspaceName: workspace.name || "Workspace",
-          planCode: plan.code,
-        },
-      },
+      checkout: buildCheckoutResponse(env, auth, workspace, savedSession),
     }, 201, corsHeaders);
   } catch (err) {
     return json({ error: err?.message || "Could not create Razorpay checkout." }, 400, corsHeaders);
   }
+}
+
+export async function postBillingCancel(request, redis, auth, workspace, membership, env, corsHeaders) {
+  if (membership?.role !== "owner") {
+    return json({ error: "Only workspace owners can manage billing." }, 403, corsHeaders);
+  }
+  if (workspace?.type === "team") {
+    return json({ error: "Plans can only be purchased from your personal workspace." }, 403, corsHeaders);
+  }
+
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    body = {};
+  }
+
+  const requestedOrderId = typeof body?.orderId === "string" ? body.orderId.trim() : "";
+  const session = requestedOrderId
+    ? await getBillingCheckoutSession(redis, requestedOrderId)
+    : await getWorkspaceOpenBillingSession(redis, workspace.id);
+
+  if (session?.workspaceId === workspace.id && isPendingCheckoutSessionState(session.state)) {
+    await mergeBillingCheckoutSession(redis, session.orderId, {
+      state: "cancelled",
+      reason: "user_cancelled",
+      lastEventType: "checkout.cancelled",
+    });
+    await clearWorkspaceOpenBillingSession(redis, workspace.id, session.orderId);
+  }
+
+  const billing = await syncWorkspaceBillingFromRazorpay(redis, workspace, env);
+  return json({
+    success: true,
+    billing: buildBillingSummary(billing, {
+      checkoutSession: null,
+      checkoutReady: isRazorpayConfigured(env),
+      mode: getRazorpayMode(env),
+      manageable: true,
+      workspaceType: workspace?.type || "personal",
+    }),
+  }, 200, corsHeaders);
 }
 
 export async function postBillingVerify(request, redis, auth, workspace, membership, env, corsHeaders) {
@@ -183,19 +276,43 @@ export async function postBillingVerify(request, redis, auth, workspace, members
   }
 
   try {
+    const existingSession = await getBillingCheckoutSession(redis, orderId);
     const mappedOrder = orderId ? await redis.get(getRazorpayOrderWorkspaceKey(orderId)) : null;
     const payment = await fetchRazorpayPayment(env, paymentId);
-    const billingWorkspaceId = mappedOrder?.billingWorkspaceId || workspace.id;
-    const savedBilling = await applyRazorpayPaymentToWorkspace(redis, billingWorkspaceId, payment, {
-      orderId,
+    const billingWorkspaceId = existingSession?.workspaceId || mappedOrder?.billingWorkspaceId || workspace.id;
+    const currentBilling = await getWorkspaceBilling(redis, billingWorkspaceId);
+    const nextSession = await mergeBillingCheckoutSession(redis, orderId, {
+      workspaceId: billingWorkspaceId,
+      requestedPlan: existingSession?.requestedPlan || mappedOrder?.planCode || currentBilling.plan,
+      previousPlan: existingSession?.previousPlan || currentBilling.plan,
+      state: payment?.status === "captured" ? "captured" : (payment?.status === "authorized" ? "authorized" : (payment?.status || "pending")),
+      amount: existingSession?.amount || payment?.amount || 0,
+      currency: existingSession?.currency || payment?.currency || "INR",
       paymentId,
-      planCode: mappedOrder?.planCode || null,
-      eventType: "checkout.verified",
-      status: payment?.status === "captured" ? "active" : payment?.status || "created",
+      lastEventType: "checkout.verified",
     });
+
+    let savedBilling = currentBilling;
+    if (nextSession?.state === "captured") {
+      savedBilling = await applyRazorpayPaymentToWorkspace(redis, billingWorkspaceId, payment, {
+        orderId,
+        paymentId,
+        planCode: nextSession.requestedPlan,
+        eventType: "checkout.verified",
+        status: "active",
+      });
+      await clearWorkspaceOpenBillingSession(redis, billingWorkspaceId, orderId);
+    } else if (nextSession?.state === "failed") {
+      await clearWorkspaceOpenBillingSession(redis, billingWorkspaceId, orderId);
+      savedBilling = await syncWorkspaceBillingFromRazorpay(redis, workspace, env);
+    } else {
+      savedBilling = await syncWorkspaceBillingFromRazorpay(redis, workspace, env);
+    }
+
     return json({
       success: true,
       billing: buildBillingSummary(savedBilling, {
+        checkoutSession: nextSession?.state === "captured" ? null : nextSession,
         checkoutReady: isRazorpayConfigured(env),
         mode: getRazorpayMode(env),
         manageable: true,
@@ -203,7 +320,7 @@ export async function postBillingVerify(request, redis, auth, workspace, members
       }),
     }, 200, corsHeaders);
   } catch (err) {
-    return json({ error: err?.message || "Payment was verified, but the subscription could not be refreshed." }, 400, corsHeaders);
+    return json({ error: err?.message || "Payment was verified, but the checkout state could not be refreshed." }, 400, corsHeaders);
   }
 }
 
@@ -265,25 +382,40 @@ export async function postRazorpayWebhook(request, redis, env, corsHeaders) {
     return json({ received: true, skipped: true }, 200, corsHeaders);
   }
 
-  const subscription = payload?.payload?.subscription?.entity;
   const payment = payload?.payload?.payment?.entity;
 
   try {
     if (shouldProcessPayment && payment?.id) {
-      await applyRazorpayPaymentToWorkspace(redis, workspaceId, payment, {
-        orderId: payment?.order_id || null,
-        paymentId: payment?.id || null,
-        planCode: mappedOrder?.planCode || null,
-        eventId: dedupeKey,
-        eventType,
-        status: payment?.status === "captured" ? "active" : payment?.status || "pending",
-      });
-    } else {
-      await mergeWorkspaceBilling(redis, workspaceId, {
-        paymentId: payment?.id || null,
-        lastWebhookEventId: dedupeKey,
-        lastWebhookEventType: eventType,
-      });
+      const orderId = payment?.order_id || null;
+      const existingSession = orderId ? await getBillingCheckoutSession(redis, orderId) : null;
+      const currentBilling = await getWorkspaceBilling(redis, workspaceId);
+      const nextSession = orderId
+        ? await mergeBillingCheckoutSession(redis, orderId, {
+          workspaceId,
+          requestedPlan: existingSession?.requestedPlan || mappedOrder?.planCode || currentBilling.plan,
+          previousPlan: existingSession?.previousPlan || currentBilling.plan,
+          state: payment?.status === "captured" ? "captured" : (payment?.status === "authorized" ? "authorized" : (payment?.status || "pending")),
+          amount: existingSession?.amount || payment?.amount || 0,
+          currency: existingSession?.currency || payment?.currency || "INR",
+          paymentId: payment?.id || null,
+          lastEventId: dedupeKey,
+          lastEventType: eventType,
+        })
+        : null;
+
+      if (payment?.status === "captured") {
+        await applyRazorpayPaymentToWorkspace(redis, workspaceId, payment, {
+          orderId,
+          paymentId: payment?.id || null,
+          planCode: nextSession?.requestedPlan || mappedOrder?.planCode || null,
+          eventId: dedupeKey,
+          eventType,
+          status: "active",
+        });
+        await clearWorkspaceOpenBillingSession(redis, workspaceId, orderId || "");
+      } else if (payment?.status === "failed") {
+        await clearWorkspaceOpenBillingSession(redis, workspaceId, orderId || "");
+      }
     }
   } catch (err) {
     return json({ error: err?.message || "Could not process Razorpay webhook." }, 400, corsHeaders);

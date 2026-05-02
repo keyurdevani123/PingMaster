@@ -162,12 +162,6 @@ export default function StatusPagesPage() {
   const statusPageLimit = Number.isFinite(entitlements?.maxStatusPages) ? entitlements.maxStatusPages : null;
   const statusPageLimitReached = !editingId && statusPageLimit != null && statusPages.length >= statusPageLimit;
 
-  if (loading) {
-    return (
-      <PageLoader />
-    );
-  }
-
   return (
     <div className="min-h-screen text-[#f2f2f2]">
         <header className="sticky top-0 z-20 border-b border-[#22252b] bg-[#0d0f13] px-5 md:px-8 py-4 flex items-center justify-between gap-4">
@@ -204,6 +198,10 @@ export default function StatusPagesPage() {
         </header>
 
         <div className="max-w-7xl mx-auto px-5 md:px-8 py-6 space-y-6">
+          {loading ? (
+            <PageLoader rows={4} />
+          ) : (
+            <>
           {error && (
             <div className="bg-red-500/10 border border-red-500/25 text-red-300 rounded-lg p-3 text-sm">
               {error}
@@ -473,6 +471,8 @@ export default function StatusPagesPage() {
               )}
             </section>
           </section>
+            </>
+          )}
 
         </div>
     </div>

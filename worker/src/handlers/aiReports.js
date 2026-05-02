@@ -1,5 +1,6 @@
 import { json } from "../lib/http.js";
 import { generateMonitorAiReport, getMonitorAiReport, saveMonitorAiReport } from "../services/aiReports.js";
+import { isPersonalWorkspaceId, workspaceCollectionHasItem } from "../services/workspaces.js";
 
 export async function getAiReport(request, redis, auth, workspace, membership, monitorId, corsHeaders) {
   const monitor = await getWorkspaceMonitor(redis, auth.userId, workspace.id, monitorId);
@@ -36,14 +37,25 @@ export async function postAiReport(request, redis, auth, workspace, membership, 
     await saveMonitorAiReport(redis, workspace.id, monitorId, generated);
     return json(generated, 200, corsHeaders);
   } catch (error) {
-    return json({ error: error?.message || "Could not generate monitor report." }, 500, corsHeaders);
+    const message = error?.name === "TimeoutError" || error?.name === "AbortError"
+      ? "Gemini took too long to generate the monitor report. Please try again."
+      : (error?.message || "Could not generate monitor report.");
+    return json({ error: message }, 500, corsHeaders);
   }
 }
 
 async function getWorkspaceMonitor(redis, userId, workspaceId, monitorId) {
   const monitor = await redis.get(`monitor:${monitorId}`);
   if (!monitor) return null;
-  if (monitor.workspaceId && monitor.workspaceId !== workspaceId) return null;
-  if (!monitor.workspaceId && monitor.userId !== userId) return null;
-  return monitor;
+  if (monitor.userId === userId) return monitor;
+
+  const fallbackKey = isPersonalWorkspaceId(workspaceId) ? `user:${userId}:monitors` : null;
+  const isLinkedToWorkspace = await workspaceCollectionHasItem(
+    redis,
+    workspaceId,
+    "monitors",
+    monitorId,
+    fallbackKey,
+  );
+  return isLinkedToWorkspace ? monitor : null;
 }

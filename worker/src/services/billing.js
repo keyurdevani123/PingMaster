@@ -1,8 +1,11 @@
 const FREE_PLAN = "free";
 const PLUS_PLAN = "plus";
 const PRO_PLAN = "pro";
-const ACTIVE_BILLING_STATUSES = new Set(["authenticated", "active", "captured"]);
-const PENDING_BILLING_STATUSES = new Set(["created", "authenticated", "pending"]);
+const ACTIVE_BILLING_STATUSES = new Set(["active", "captured"]);
+const PENDING_BILLING_STATUSES = new Set(["created", "pending", "authorized", "authenticated"]);
+const ACTIVE_CHECKOUT_SESSION_STATES = new Set(["created", "pending", "authorized"]);
+const TERMINAL_CHECKOUT_SESSION_STATES = new Set(["captured", "failed", "cancelled", "expired"]);
+const DEFAULT_CHECKOUT_SESSION_TTL_MS = 30 * 60 * 1000;
 const DEFAULT_PLUS_AMOUNT_PAISA = 24900;
 const DEFAULT_PRO_AMOUNT_PAISA = 79900;
 
@@ -90,6 +93,14 @@ function getWorkspaceBillingKey(workspaceId) {
   return `workspace_billing:${workspaceId}`;
 }
 
+function getBillingCheckoutSessionKey(orderId) {
+  return `billing_checkout_session:${orderId}`;
+}
+
+function getWorkspaceOpenBillingSessionKey(workspaceId) {
+  return `workspace_billing_open_session:${workspaceId}`;
+}
+
 function resolveBillingWorkspaceId(workspace) {
   return typeof workspace === "string"
     ? workspace
@@ -115,9 +126,45 @@ function normalizeStatus(value) {
 function toIsoString(value) {
   if (!value && value !== 0) return null;
   const date = typeof value === "number"
-    ? new Date(value * 1000)
+    ? new Date(value > 1e12 ? value : value * 1000)
     : new Date(value);
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function normalizeCheckoutState(value) {
+  const text = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (!text) return "pending";
+  return text;
+}
+
+function buildCheckoutExpiry(createdAt) {
+  const base = createdAt ? new Date(createdAt) : new Date();
+  if (Number.isNaN(base.getTime())) return new Date(Date.now() + DEFAULT_CHECKOUT_SESSION_TTL_MS).toISOString();
+  return new Date(base.getTime() + DEFAULT_CHECKOUT_SESSION_TTL_MS).toISOString();
+}
+
+function normalizeCheckoutSession(orderId, value = {}) {
+  const createdAt = toIsoString(value?.createdAt) || new Date().toISOString();
+  const updatedAt = toIsoString(value?.updatedAt) || createdAt;
+  const expiresAt = toIsoString(value?.expiresAt) || buildCheckoutExpiry(createdAt);
+
+  return {
+    orderId: value?.orderId || orderId,
+    workspaceId: value?.workspaceId || "",
+    requestedPlan: normalizePlanCode(value?.requestedPlan),
+    previousPlan: normalizePlanCode(value?.previousPlan),
+    state: normalizeCheckoutState(value?.state),
+    amount: Number.isFinite(value?.amount) ? value.amount : 0,
+    currency: typeof value?.currency === "string" && value.currency.trim() ? value.currency.trim().toUpperCase() : "INR",
+    paymentId: value?.paymentId || null,
+    receipt: value?.receipt || null,
+    reason: value?.reason || "",
+    lastEventId: value?.lastEventId || null,
+    lastEventType: value?.lastEventType || null,
+    createdAt,
+    updatedAt,
+    expiresAt,
+  };
 }
 
 function normalizeBillingRecord(workspaceId, value = {}) {
@@ -185,7 +232,7 @@ function repairBillingRecordState(billing) {
   if (isPaid) {
     if (normalized.pendingPlan) patch.pendingPlan = null;
     if (normalized.lastPaidPlan !== normalized.plan) patch.lastPaidPlan = normalized.plan;
-  } else if (PENDING_BILLING_STATUSES.has(status)) {
+  } else if (PENDING_BILLING_STATUSES.has(status) && hasRemotePaymentReference) {
     const requestedPlan = normalized.pendingPlan
       || (normalizePlanCode(normalized.plan) !== stablePlan ? normalizePlanCode(normalized.plan) : null);
 
@@ -233,6 +280,107 @@ function billingRecordsDiffer(left, right) {
   return keys.some((key) => (left?.[key] || null) !== (right?.[key] || null));
 }
 
+export function isPendingCheckoutSessionState(state) {
+  return ACTIVE_CHECKOUT_SESSION_STATES.has(normalizeCheckoutState(state));
+}
+
+function isTerminalCheckoutSessionState(state) {
+  return TERMINAL_CHECKOUT_SESSION_STATES.has(normalizeCheckoutState(state));
+}
+
+function isCheckoutSessionExpired(session) {
+  if (!session?.expiresAt) return false;
+  const expiresAt = new Date(session.expiresAt);
+  if (Number.isNaN(expiresAt.getTime())) return false;
+  return expiresAt.getTime() <= Date.now();
+}
+
+export async function getBillingCheckoutSession(redis, orderId) {
+  if (!orderId) return null;
+  const existing = await redis.get(getBillingCheckoutSessionKey(orderId));
+  if (!existing) return null;
+  return normalizeCheckoutSession(orderId, existing);
+}
+
+export async function saveBillingCheckoutSession(redis, orderId, value) {
+  if (!orderId) return null;
+  const nextValue = normalizeCheckoutSession(orderId, value);
+  await redis.set(getBillingCheckoutSessionKey(orderId), nextValue);
+  return nextValue;
+}
+
+export async function mergeBillingCheckoutSession(redis, orderId, patch) {
+  const current = await getBillingCheckoutSession(redis, orderId);
+  const base = current || normalizeCheckoutSession(orderId, { orderId });
+  return saveBillingCheckoutSession(redis, orderId, {
+    ...base,
+    ...patch,
+    orderId,
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+export async function clearWorkspaceOpenBillingSession(redis, workspaceId, expectedOrderId = "") {
+  if (!workspaceId) return;
+  const current = await redis.get(getWorkspaceOpenBillingSessionKey(workspaceId));
+  const currentOrderId = typeof current === "string" ? current : (current?.orderId || "");
+  if (!currentOrderId) return;
+  if (expectedOrderId && currentOrderId !== expectedOrderId) return;
+  await redis.del(getWorkspaceOpenBillingSessionKey(workspaceId));
+}
+
+export async function setWorkspaceOpenBillingSession(redis, workspaceId, orderId) {
+  if (!workspaceId || !orderId) return;
+  await redis.set(getWorkspaceOpenBillingSessionKey(workspaceId), orderId);
+}
+
+function buildCheckoutSummary(session) {
+  if (!session) return null;
+  return {
+    orderId: session.orderId,
+    requestedPlan: session.requestedPlan,
+    requestedPlanLabel: getBillingPlanConfig(session.requestedPlan).label,
+    previousPlan: session.previousPlan,
+    previousPlanLabel: getBillingPlanConfig(session.previousPlan).label,
+    state: normalizeCheckoutState(session.state),
+    amount: session.amount,
+    currency: session.currency || "INR",
+    paymentId: session.paymentId || null,
+    reason: session.reason || "",
+    createdAt: session.createdAt || null,
+    updatedAt: session.updatedAt || null,
+    expiresAt: session.expiresAt || null,
+  };
+}
+
+export async function getWorkspaceOpenBillingSession(redis, workspaceId) {
+  if (!workspaceId) return null;
+  const mapped = await redis.get(getWorkspaceOpenBillingSessionKey(workspaceId));
+  const orderId = typeof mapped === "string" ? mapped : (mapped?.orderId || "");
+  if (!orderId) return null;
+
+  const session = await getBillingCheckoutSession(redis, orderId);
+  if (!session) {
+    await clearWorkspaceOpenBillingSession(redis, workspaceId, orderId);
+    return null;
+  }
+
+  if (isPendingCheckoutSessionState(session.state) && isCheckoutSessionExpired(session)) {
+    const expired = await mergeBillingCheckoutSession(redis, orderId, {
+      state: "expired",
+      reason: session.reason || "checkout_timeout",
+    });
+    await clearWorkspaceOpenBillingSession(redis, workspaceId, orderId);
+    return expired;
+  }
+
+  if (isTerminalCheckoutSessionState(session.state)) {
+    await clearWorkspaceOpenBillingSession(redis, workspaceId, orderId);
+  }
+
+  return session;
+}
+
 export function getEntitlementsForBilling(billing) {
   const planCode = getStableBillingPlanCode(billing);
   const normalized = planCode !== FREE_PLAN && isPaidBillingStatus(billing?.status)
@@ -245,25 +393,32 @@ export function buildBillingSummary(billing, options = {}) {
   const stablePlanCode = getStableBillingPlanCode(billing);
   const plan = PLAN_CONFIG[stablePlanCode];
   const status = normalizeStatus(billing?.status);
+  const checkoutSession = buildCheckoutSummary(options.checkoutSession || null);
+  const hasPendingCheckout = isPendingCheckoutSessionState(checkoutSession?.state);
+  const pendingPlanCode = hasPendingCheckout
+    ? normalizePlanCode(checkoutSession?.requestedPlan)
+    : null;
   const isPaid = plan.code !== FREE_PLAN && isPaidBillingStatus(status);
   return {
     provider: billing?.provider || "razorpay",
     plan: plan.code,
     planLabel: plan.label,
-    pendingPlan: billing?.pendingPlan || null,
-    pendingPlanLabel: billing?.pendingPlan ? getBillingPlanConfig(billing.pendingPlan).label : null,
+    pendingPlan: pendingPlanCode,
+    pendingPlanLabel: pendingPlanCode ? getBillingPlanConfig(pendingPlanCode).label : null,
     lastPaidPlan: billing?.lastPaidPlan || null,
     description: plan.description,
     priceMonthlyPaise: plan.priceMonthlyPaise,
     priceMonthlyLabel: plan.priceMonthlyLabel,
     status,
     isPaid,
-    orderId: billing?.orderId || null,
+    orderId: checkoutSession?.orderId || billing?.orderId || null,
     subscriptionId: billing?.subscriptionId || null,
     customerId: billing?.customerId || null,
-    paymentId: billing?.paymentId || null,
+    paymentId: checkoutSession?.paymentId || billing?.paymentId || null,
     currentPeriodStart: billing?.currentPeriodStart || null,
     currentPeriodEnd: billing?.currentPeriodEnd || null,
+    checkoutSession,
+    hasPendingCheckout,
     entitlements: getEntitlementsForBilling(billing),
     availablePlans: listBillingPlans(),
     checkoutReady: options.checkoutReady === true,

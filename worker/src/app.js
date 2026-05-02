@@ -5,6 +5,7 @@ import {
   addMonitor,
   addChildMonitors,
   deleteMonitor,
+  getDashboardEvents,
   getChildMonitors,
   getHistory,
   getMonitors,
@@ -60,6 +61,7 @@ import {
 } from "./handlers/team.js";
 import {
   getBillingHandler,
+  postBillingCancel,
   postBillingSubscribe,
   postBillingVerify,
   postRazorpayWebhook,
@@ -117,59 +119,61 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
     const method = request.method;
-    const corsHeaders = createCorsHeaders();
+    const corsHeaders = createCorsHeaders(request, env);
+    const startedAt = Date.now();
+    const requestedWorkspaceId = request.headers.get("X-Workspace-Id") || "";
+    let auth = null;
 
     if (method === "OPTIONS") {
-      return new Response(null, { headers: corsHeaders });
+      return new Response(null, { status: 204, headers: corsHeaders });
     }
 
-    if (path === "/" && method === "GET") {
-      return json({
-        ok: true,
-        service: "pingmaster-worker",
-        message: "PingMaster API is running.",
-        health: "/health",
-      }, 200, corsHeaders);
-    }
-
-    if (path === "/health" && method === "GET") {
-      return json(buildHealthPayload(env), 200, corsHeaders);
-    }
-
-    const redis = createRedis(env);
-
-    if (path.startsWith("/status/") && method === "GET") {
-      return getPublicStatusPage(request, redis, path.split("/")[2], corsHeaders);
-    }
-
-    if (path === "/billing/webhooks/razorpay" && method === "POST") {
-      return postRazorpayWebhook(request, redis, env, corsHeaders);
-    }
-
-    let auth;
     try {
-      auth = await authenticate(request, env);
-    } catch (err) {
-      const status = err instanceof AuthError ? err.status : 401;
-      return json({ error: err.message || "Unauthorized" }, status, corsHeaders);
-    }
-    const userId = auth.userId;
-    const requestedWorkspaceId = request.headers.get("X-Workspace-Id") || "";
+      if (path === "/" && method === "GET") {
+        return json({
+          ok: true,
+          service: "pingmaster-worker",
+          message: "PingMaster API is running.",
+          health: "/health",
+        }, 200, corsHeaders);
+      }
 
-    if (path === "/session/bootstrap" && method === "GET") {
-      return json(await buildBootstrapPayload(redis, auth, requestedWorkspaceId, env), 200, corsHeaders);
-    }
+      if (path === "/health" && method === "GET") {
+        return json(buildHealthPayload(env), 200, corsHeaders);
+      }
 
-    if (path.startsWith("/team/invites/") && path.endsWith("/accept") && method === "POST") {
-      return acceptTeamInvite(request, redis, auth, path.split("/")[3], corsHeaders);
-    }
+      const redis = createRedis(env);
 
-    const workspaceContext = await resolveWorkspaceForUser(redis, userId, requestedWorkspaceId, auth.email);
-    if (!workspaceContext) {
-      return json({ error: "Forbidden" }, 403, corsHeaders);
-    }
-    const { workspace, membership } = workspaceContext;
-    const workspaceId = workspace.id;
+      if (path.startsWith("/status/") && method === "GET") {
+        return getPublicStatusPage(request, redis, path.split("/")[2], corsHeaders);
+      }
+
+      if (path === "/billing/webhooks/razorpay" && method === "POST") {
+        return postRazorpayWebhook(request, redis, env, corsHeaders);
+      }
+
+      try {
+        auth = await authenticate(request, env);
+      } catch (err) {
+        const status = err instanceof AuthError ? err.status : 401;
+        return json({ error: err.message || "Unauthorized" }, status, corsHeaders);
+      }
+      const userId = auth.userId;
+
+      if (path === "/session/bootstrap" && method === "GET") {
+        return json(await buildBootstrapPayload(redis, auth, requestedWorkspaceId, env), 200, corsHeaders);
+      }
+
+      if (path.startsWith("/team/invites/") && path.endsWith("/accept") && method === "POST") {
+        return acceptTeamInvite(request, redis, auth, path.split("/")[3], corsHeaders);
+      }
+
+      const workspaceContext = await resolveWorkspaceForUser(redis, userId, requestedWorkspaceId, auth.email);
+      if (!workspaceContext) {
+        return json({ error: "Forbidden" }, 403, corsHeaders);
+      }
+      const { workspace, membership } = workspaceContext;
+      const workspaceId = workspace.id;
 
     if (path === "/team/members" && method === "GET") {
       return getTeamMembers(request, redis, auth, workspace, membership, corsHeaders);
@@ -185,6 +189,10 @@ export default {
 
     if (path === "/billing/verify" && method === "POST") {
       return postBillingVerify(request, redis, auth, workspace, membership, env, corsHeaders);
+    }
+
+    if (path === "/billing/cancel" && method === "POST") {
+      return postBillingCancel(request, redis, auth, workspace, membership, env, corsHeaders);
     }
 
     if (path === "/team/workspaces" && method === "POST") {
@@ -229,6 +237,10 @@ export default {
 
     if (path === "/monitors/summary" && method === "GET") {
       return getMonitorSummary(request, redis, userId, workspaceId, corsHeaders);
+    }
+
+    if (path === "/dashboard/events" && method === "GET") {
+      return getDashboardEvents(request, redis, userId, workspaceId, corsHeaders);
     }
 
     if (path === "/incidents" && method === "GET") {
@@ -379,7 +391,21 @@ export default {
       return pingDiagnostics(request, userId, corsHeaders);
     }
 
-    return new Response("Not found", { status: 404, headers: corsHeaders });
+      return new Response("Not found", { status: 404, headers: corsHeaders });
+    } catch (error) {
+      console.error("worker_request_failed", {
+        path,
+        method,
+        userId: auth?.userId || null,
+        workspaceId: requestedWorkspaceId || null,
+        durationMs: Date.now() - startedAt,
+        message: error?.message || "Internal server error",
+        stack: typeof error?.stack === "string"
+          ? error.stack.split("\n").slice(0, 4).join(" | ")
+          : null,
+      });
+      return json({ error: error?.message || "Internal server error" }, 500, corsHeaders);
+    }
   },
 
   async scheduled(_event, env) {
@@ -390,6 +416,16 @@ export default {
       console.warn(error?.message || "Scheduled monitoring skipped because Redis is not configured.");
       return;
     }
-    await runPinger(redis, env);
+    try {
+      await runPinger(redis, env);
+    } catch (error) {
+      console.error("scheduled_monitoring_failed", {
+        message: error?.message || "Scheduled monitoring failed.",
+        stack: typeof error?.stack === "string"
+          ? error.stack.split("\n").slice(0, 4).join(" | ")
+          : null,
+      });
+      throw error;
+    }
   },
 };

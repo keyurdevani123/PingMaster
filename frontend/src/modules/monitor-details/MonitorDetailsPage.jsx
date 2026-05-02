@@ -77,7 +77,7 @@ import {
 
 export default function MonitorDetailsPage() {
   const { monitorId } = useParams();
-  const { user, logout, workspace } = useAuth();
+  const { user, workspace } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -630,12 +630,8 @@ export default function MonitorDetailsPage() {
               <p className="text-sm text-[#8d94a0] break-all mt-0.5">{monitor.url}</p>
             </div>
           </div>
-          <div className="flex items-center gap-2 md:gap-3 pt-1 shrink-0">
-            <button type="button" onClick={logout} className="h-10 px-3 rounded-lg border border-[#252a33] bg-[#14181e] text-[#d4dae4] text-sm">
-              Logout
-            </button>
-          </div>
-        </header>
+            <div className="flex items-center gap-2 md:gap-3 pt-1 shrink-0" />
+          </header>
 
         <main className="max-w-7xl mx-auto px-5 md:px-8 py-6 space-y-6">
           {error && (

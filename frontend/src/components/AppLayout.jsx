@@ -17,6 +17,7 @@ export default function AppLayout({ children }) {
   const navigate = useNavigate();
   const location = useLocation();
   const [profileOpen, setProfileOpen] = useState(false);
+  const [logoutConfirmOpen, setLogoutConfirmOpen] = useState(false);
 
   const displayName = user?.displayName || user?.email?.split("@")[0] || "User";
   const initials = displayName.split(/\s+/).map((word) => word[0]).join("").toUpperCase().slice(0, 2);
@@ -31,7 +32,7 @@ export default function AppLayout({ children }) {
       <aside className="hidden md:flex w-65 h-screen sticky top-0 flex-col border-r border-[#1a1d24] bg-[#0c0e12] shrink-0">
         <div className="px-5 py-5 border-b border-[#1a1d24]">
           <h1 className="text-[15px] font-bold tracking-tight text-white">PingMaster</h1>
-          <p className="text-[12px] text-[#6b7280] mt-0.5">Website Reliability</p>
+          <p className="text-[12px] text-[#6b7280] mt-0.5">Web Monitoring System</p>
         </div>
 
         <nav className="flex-1 px-3 py-4 space-y-0.5 overflow-y-auto">
@@ -88,7 +89,7 @@ export default function AppLayout({ children }) {
         <header className="md:hidden sticky top-0 z-30 border-b border-[#1a1d24] bg-[#0c0e12]/95 backdrop-blur px-4 py-3 flex items-center justify-between">
           <div>
             <h1 className="text-sm font-semibold text-white">PingMaster</h1>
-            <p className="text-[11px] text-[#6b7280]">Website Reliability</p>
+            <p className="text-[11px] text-[#6b7280]">Web Monitoring System</p>
           </div>
           <button
             type="button"
@@ -137,7 +138,20 @@ export default function AppLayout({ children }) {
           initials={initials}
           displayName={displayName}
           onClose={() => setProfileOpen(false)}
-          onLogout={handleLogout}
+          onLogout={() => setLogoutConfirmOpen(true)}
+        />
+      )}
+
+      {logoutConfirmOpen && (
+        <ConfirmActionModal
+          title="Log out of PingMaster?"
+          message="You can sign back in anytime. This just ends the current session on this device."
+          confirmLabel="Log Out"
+          onCancel={() => setLogoutConfirmOpen(false)}
+          onConfirm={async () => {
+            setLogoutConfirmOpen(false);
+            await handleLogout();
+          }}
         />
       )}
     </div>
@@ -150,10 +164,11 @@ function ProfileModal({ user, billing, entitlements, workspace, initials, displa
     ? new Date(user.metadata.creationTime).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })
     : "--";
   const planLabel = billing?.planLabel || "Free";
-  const monitorLimit = Number.isFinite(entitlements?.maxMonitors) ? String(entitlements.maxMonitors) : "--";
-  const statusPageLimit = Number.isFinite(entitlements?.maxStatusPages) ? String(entitlements.maxStatusPages) : "--";
-  const sharedWorkspaceLimit = Number.isFinite(entitlements?.maxTeamWorkspaces) && entitlements.maxTeamWorkspaces > 0
-    ? String(entitlements.maxTeamWorkspaces)
+  const effectiveEntitlements = billing?.entitlements || entitlements || {};
+  const monitorLimit = Number.isFinite(effectiveEntitlements?.maxMonitors) ? String(effectiveEntitlements.maxMonitors) : "0";
+  const statusPageLimit = Number.isFinite(effectiveEntitlements?.maxStatusPages) ? String(effectiveEntitlements.maxStatusPages) : "0";
+  const sharedWorkspaceLimit = Number.isFinite(effectiveEntitlements?.maxTeamWorkspaces) && effectiveEntitlements.maxTeamWorkspaces > 0
+    ? String(effectiveEntitlements.maxTeamWorkspaces)
     : "Not included";
 
   return (
@@ -228,6 +243,39 @@ function Row({ label, value }) {
     <div className="flex items-center justify-between gap-3">
       <span className="text-[12px] text-[#666666]">{label}</span>
       <span className="text-[12px] text-[#cccccc]">{value}</span>
+    </div>
+  );
+}
+
+function ConfirmActionModal({ title, message, confirmLabel, onCancel, onConfirm }) {
+  return (
+    <div
+      className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4"
+      onClick={onCancel}
+    >
+      <div
+        className="bg-[#0f1217] border border-[#252a33] rounded-2xl w-full max-w-sm p-6 shadow-2xl"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <h2 className="text-lg font-semibold text-white">{title}</h2>
+        <p className="mt-2 text-sm text-[#8d94a0] leading-6">{message}</p>
+        <div className="mt-6 flex gap-3">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="flex-1 h-10 rounded-lg border border-[#2a2a2a] bg-[#14181e] text-sm text-[#cdd5e0]"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            className="flex-1 h-10 rounded-lg bg-[#1a0f0f] border border-[#3d1a1a] text-sm text-[#f87171] font-semibold"
+          >
+            {confirmLabel}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

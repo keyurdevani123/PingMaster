@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ArrowRight, CheckCircle2, CreditCard, ShieldCheck, Sparkles } from "lucide-react";
 import PageLoader from "../../components/PageLoader";
-import { createBillingSubscription, fetchBilling, verifyBillingSubscription } from "../../api";
+import { cancelBillingCheckout, createBillingSubscription, fetchBilling, verifyBillingSubscription } from "../../api";
 import { useAuth } from "../../context/AuthContext";
 
 const RAZORPAY_CHECKOUT_URL = "https://checkout.razorpay.com/v1/checkout.js";
@@ -77,13 +77,18 @@ export default function BillingPage() {
   }, [loadBillingState, workspace?.id]);
 
   useEffect(() => {
+    const pendingPlan = getPlanCode(billingState?.checkoutSession?.requestedPlan || billingState?.pendingPlan);
+    if (billingState?.hasPendingCheckout && pendingPlan !== "free") {
+      setSelectedPlan(pendingPlan);
+      return;
+    }
     const lockedPlan = getLockedPlanCode(billingState);
     if (lockedPlan !== "free") {
       setSelectedPlan(lockedPlan);
       return;
     }
     setSelectedPlan((prev) => (prev === "free" ? "plus" : prev));
-  }, [billingState?.isPaid, billingState?.plan, billingState?.pendingPlan, billingState?.status]);
+  }, [billingState?.isPaid, billingState?.plan, billingState?.pendingPlan, billingState?.status, billingState?.hasPendingCheckout, billingState?.checkoutSession?.requestedPlan]);
 
   const resetSelectionToCurrentPlan = useCallback((nextBilling) => {
     const activePlan = getPlanCode(nextBilling?.plan);
@@ -151,7 +156,7 @@ export default function BillingPage() {
           }
         },
         modal: {
-          ondismiss: () => finishResolve({ dismissed: true }),
+          ondismiss: () => finishResolve({ dismissed: true, orderId: checkout.orderId }),
         },
       });
 
@@ -173,6 +178,7 @@ export default function BillingPage() {
       const paidBilling = await waitForPaidBillingState(planToStart);
       if (!paidBilling?.isPaid || paidBilling?.plan !== planToStart) {
         if (checkoutResult?.dismissed) {
+          await cancelBillingCheckout(user, { orderId: checkoutResult?.orderId || payload?.checkout?.orderId || "" }).catch(() => null);
           const refreshed = await fetchBilling(user, { force: true });
           const refreshedBilling = refreshed?.billing || null;
           setBillingState(refreshedBilling);
@@ -200,13 +206,14 @@ export default function BillingPage() {
     await selectWorkspace(personalWorkspace.id);
   }
 
-  if (loading) return <PageLoader rows={3} />;
-
   const billing = billingState || sessionBilling || null;
+  const checkoutSession = billing?.checkoutSession || null;
+  const checkoutState = String(checkoutSession?.state || "").toLowerCase();
+  const pendingCheckoutPlan = getPlanCode(checkoutSession?.requestedPlan || billing?.pendingPlan);
   const currentPlanCode = getPlanCode(billing?.plan);
   const lockedPlanCode = getLockedPlanCode(billing);
   const hasLockedPaidPlan = billing?.isPaid && lockedPlanCode !== "free";
-  const hasPendingUpgrade = !billing?.isPaid && getPlanCode(billing?.pendingPlan) !== "free";
+  const hasPendingUpgrade = Boolean(billing?.hasPendingCheckout) && pendingCheckoutPlan !== "free";
   const resolvedSelectedPlan = hasLockedPaidPlan && getPlanRank(selectedPlan) < getPlanRank(lockedPlanCode)
     ? lockedPlanCode
     : selectedPlan;
@@ -216,9 +223,18 @@ export default function BillingPage() {
   const selectedPlanConfig = (billing?.availablePlans || []).find((plan) => plan.code === resolvedSelectedPlan) || null;
   const isCurrentSelectionActive = resolvedSelectedPlan !== "free" && billing?.isPaid && billing?.plan === resolvedSelectedPlan;
   const isAttachedSelection = resolvedSelectedPlan !== "free"
-    && resolvedSelectedPlan === getPlanCode(billing?.pendingPlan || billing?.plan)
-    && Boolean(billing?.orderId)
-    && ["created", "authenticated", "pending"].includes(String(billing?.status || "").toLowerCase());
+    && resolvedSelectedPlan === pendingCheckoutPlan
+    && Boolean(checkoutSession?.orderId || billing?.orderId)
+    && ["created", "pending", "authorized", "authenticated"].includes(checkoutState);
+  const actionLabel = resolvedSelectedPlan === "free"
+    ? "Free Plan Selected"
+    : isAttachedSelection
+      ? `${selectedPlanConfig?.label || "Plan"} Checkout Pending`
+      : isCurrentSelectionActive
+        ? `${selectedPlanConfig?.label || "Plan"} Already Active`
+        : submitting
+          ? "Opening Checkout..."
+          : `Start ${selectedPlanConfig?.label || "Selected"} Checkout`;
 
   return (
     <div className="min-h-screen bg-[#08090b] text-[#f2f2f2]">
@@ -243,6 +259,10 @@ export default function BillingPage() {
       </header>
 
       <main className="max-w-7xl mx-auto px-6 md:px-8 py-8 space-y-6">
+        {loading ? (
+          <PageLoader rows={4} />
+        ) : (
+          <>
         {error && <div className="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">{error}</div>}
         {success && <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-200">{success}</div>}
         {billing?.notice && <div className="rounded-xl border border-[#2b3442] bg-[#10141b] px-4 py-3 text-sm text-[#cfd6e3]">{billing.notice}</div>}
@@ -253,7 +273,7 @@ export default function BillingPage() {
         ) : null}
         {hasPendingUpgrade ? (
           <div className="rounded-xl border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
-            {`${formatPlanLabel(billing?.pendingPlan)} checkout was started, but access will stay on ${formatPlanLabel(currentPlanCode)} until Razorpay confirms the payment.`}
+            {`${formatPlanLabel(pendingCheckoutPlan)} checkout is in progress. Access stays on ${formatPlanLabel(currentPlanCode)} until the payment is captured.`}
           </div>
         ) : null}
 
@@ -264,9 +284,9 @@ export default function BillingPage() {
             helper={displayPlanConfig?.description || billing?.description || "Workspace plan"}
           />
           <MetricCard
-            label="Plan Status"
-            value={formatStatusLabel(billing?.status)}
-            helper={billing?.isPaid ? "Paid access is active" : hasLockedPaidPlan ? "Paid plan is attached and syncing" : "Core access only"}
+            label="Access Status"
+            value={getBillingStatusValue({ billing, checkoutState, hasPendingUpgrade, hasLockedPaidPlan })}
+            helper={getBillingStatusHelper({ billing, checkoutState, hasPendingUpgrade, hasLockedPaidPlan })}
           />
           <MetricCard label="Renewal" value={formatDate(billing?.currentPeriodEnd)} helper={billing?.currentPeriodEnd ? "Current billing period end" : "No renewal scheduled"} />
         </section>
@@ -295,7 +315,7 @@ export default function BillingPage() {
           <div className="flex items-start justify-between gap-4">
             <div>
               <h2 className="text-xl font-semibold text-white">Choose the right plan</h2>
-              <p className="mt-2 text-sm text-[#8d94a0]">Slack and Discord alerts are available on every plan. Plus unlocks shared workspaces and AI insights. Pro lifts the operating limits further.</p>
+              <p className="mt-2 text-sm text-[#8d94a0]">Choose the plan that matches your monitor limits, public status pages, and team collaboration needs.</p>
             </div>
             <div className="w-11 h-11 rounded-xl border border-[#252a33] bg-[#14181e] grid place-items-center shrink-0">
               <CreditCard className="w-5 h-5 text-[#dbe1eb]" />
@@ -381,7 +401,7 @@ export default function BillingPage() {
                 </div>
 
                 <div className="rounded-xl border border-[#252a33] bg-[#14181e] p-4 space-y-3">
-                  <InfoLine icon={CheckCircle2} text="Slack, Discord, and email delivery are available across all plans." />
+                  <InfoLine icon={CheckCircle2} text="Alerts, status pages, and team features expand as you move up plans." />
                   <InfoLine icon={ShieldCheck} text={selectedPlanConfig.entitlements?.canUseAiReports ? "AI insights are included in this plan." : "AI insights are not included in this plan."} />
                   <InfoLine icon={ArrowRight} text={resolvedSelectedPlan === "free" ? "Stay on Free for core monitoring." : "Razorpay verifies the payment before the new plan is activated."} />
                 </div>
@@ -416,9 +436,9 @@ export default function BillingPage() {
             ) : (
               <>
                 <div className="rounded-xl border border-[#252a33] bg-[#14181e] p-4 space-y-3">
-                  <InfoLine icon={ShieldCheck} text="Payments unlock only after backend signature verification." />
-                  <InfoLine icon={CheckCircle2} text="Webhook updates keep billing in sync after the first checkout." />
-                  <InfoLine icon={ArrowRight} text="Plus unlocks shared workspaces. Pro raises the limits further." />
+                  <InfoLine icon={ShieldCheck} text="Checkout is secure and your plan activates as soon as payment is confirmed." />
+                  <InfoLine icon={CheckCircle2} text="Change plans anytime from your personal workspace billing page." />
+                  <InfoLine icon={ArrowRight} text="Plus is built for growing teams. Pro gives you more capacity for larger operations." />
                 </div>
 
                 <button
@@ -427,20 +447,12 @@ export default function BillingPage() {
                   disabled={submitting || !billing?.checkoutReady || resolvedSelectedPlan === "free" || isCurrentSelectionActive || isAttachedSelection}
                   className="h-11 px-5 rounded-lg bg-white text-black text-sm font-semibold inline-flex items-center gap-2 disabled:opacity-50"
                 >
-                  {resolvedSelectedPlan === "free"
-                    ? "Free Plan Selected"
-                    : isCurrentSelectionActive || isAttachedSelection
-                      ? ["created", "authenticated", "pending"].includes(String(billing?.status || "").toLowerCase()) && billing?.pendingPlan === resolvedSelectedPlan
-                        ? `${selectedPlanConfig?.label || "Plan"} Checkout Pending`
-                        : `${selectedPlanConfig?.label || "Plan"} Already Active`
-                      : submitting
-                        ? "Opening Checkout..."
-                        : `Start ${selectedPlanConfig?.label || "Selected"} Checkout`}
+                  {actionLabel}
                 </button>
 
                 {resolvedSelectedPlan === "free" ? (
                   <div className="rounded-lg border border-[#252a33] bg-[#14181e] px-4 py-3 text-sm text-[#cfd6e3]">
-                    Free stays active by default. Select Plus or Pro when you want higher limits.
+                    You're currently on the Free plan. Upgrade to Plus or Pro whenever you need more monitors, status pages, or team capacity.
                   </div>
                 ) : null}
 
@@ -453,6 +465,8 @@ export default function BillingPage() {
             )}
           </section>
         </section>
+          </>
+        )}
       </main>
     </div>
   );
@@ -498,6 +512,23 @@ function formatStatusLabel(value) {
     .join(" ");
 }
 
+function getBillingStatusValue({ billing, checkoutState, hasPendingUpgrade }) {
+  if (hasPendingUpgrade) return "Checkout Pending";
+  if (billing?.isPaid) return "Active";
+  if (checkoutState === "failed") return "Payment Failed";
+  if (checkoutState === "cancelled") return "Checkout Cancelled";
+  return "Included";
+}
+
+function getBillingStatusHelper({ billing, checkoutState, hasPendingUpgrade, hasLockedPaidPlan }) {
+  if (hasPendingUpgrade) return `Waiting for ${formatStatusLabel(checkoutState)} payment confirmation`;
+  if (billing?.isPaid) return "Paid access is active for this workspace";
+  if (hasLockedPaidPlan) return "A paid plan is attached and syncing";
+  if (checkoutState === "failed") return "No plan changes were applied";
+  if (checkoutState === "cancelled") return "Your previous access stays unchanged";
+  return "Core monitoring is available";
+}
+
 function formatDate(value) {
   if (!value) return "--";
   const date = new Date(value);
@@ -515,9 +546,8 @@ function getPlanRank(value) {
 }
 
 function getLockedPlanCode(billing) {
-  const currentPlan = getPlanCode(billing?.plan);
-  const pendingPlan = getPlanCode(billing?.pendingPlan);
-  return getPlanRank(pendingPlan) > getPlanRank(currentPlan) ? pendingPlan : currentPlan;
+  if (!billing?.isPaid) return "free";
+  return getPlanCode(billing?.plan);
 }
 
 function formatPlanLabel(value) {

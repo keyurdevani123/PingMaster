@@ -3,7 +3,14 @@ import { getBillingPlanConfig, getEntitlementsForBilling, getWorkspaceBilling } 
 import { json } from "../lib/http.js";
 import { attachPsiCapability } from "../lib/psi.js";
 import { buildChildMonitorName, getBaseEndpoint, isStaticPath, normalizeEndpointList } from "../lib/urls.js";
-import { buildMonitorMetricsSummary, checkEndpoint, pingMonitor, validateMonitorCandidate } from "../services/monitoring.js";
+import {
+  buildMonitorMetricsSummary,
+  checkEndpoint,
+  getWorkspaceMonitorEvents,
+  normalizeMonitorStatusForDisplay,
+  pingMonitor,
+  validateMonitorCandidate,
+} from "../services/monitoring.js";
 import { invalidateWorkspaceStatusPageCaches } from "../services/statusPages.js";
 import { countOwnedMonitors } from "../services/planUsage.js";
 import {
@@ -83,6 +90,15 @@ async function canAccessWorkspaceMonitor(redis, monitor, userId, workspaceId) {
   );
 }
 
+function toDashboardMonitor(monitor) {
+  const displayStatus = normalizeMonitorStatusForDisplay(monitor?.status);
+  return {
+    ...monitor,
+    displayStatus,
+    lifecycleState: monitor?.lifecycleState || (displayStatus ? "active" : "created"),
+  };
+}
+
 // ── Handlers ───────────────────────────────────────────────────────────────────
 
 export async function addMonitor(request, redis, userId, workspaceId, corsHeaders) {
@@ -125,7 +141,7 @@ export async function addMonitor(request, redis, userId, workspaceId, corsHeader
   const existingId = await redis.get(urlIndexKey);
   if (existingId) {
     const existingMonitor = await redis.get(`monitor:${existingId}`);
-    if (existingMonitor) return json(attachPsiCapability(existingMonitor), 200, corsHeaders);
+    if (existingMonitor) return json(attachPsiCapability(toDashboardMonitor(existingMonitor)), 200, corsHeaders);
     await redis.del(urlIndexKey);
   }
 
@@ -139,6 +155,7 @@ export async function addMonitor(request, redis, userId, workspaceId, corsHeader
     endpoints: [canonicalUrl],
     type: "parent",
     status: "PENDING",
+    lifecycleState: "created",
     createdAt: new Date().toISOString(),
     lastContentType: validation.contentType || "",
     metrics24h: {
@@ -164,7 +181,7 @@ export async function addMonitor(request, redis, userId, workspaceId, corsHeader
   await invalidateWorkspaceStatusPageCaches(redis, workspaceId);
   await invalidateWorkspaceMonitorSummary(redis, workspaceId);
 
-  return json(monitor, 201, corsHeaders);
+  return json(toDashboardMonitor(monitor), 201, corsHeaders);
 }
 
 export async function getMonitors(request, redis, userId, workspaceId, corsHeaders) {
@@ -216,7 +233,7 @@ export async function getMonitors(request, redis, userId, workspaceId, corsHeade
             },
           }
         : monitor;
-      return attachPsiCapability(enriched);
+      return attachPsiCapability(toDashboardMonitor(enriched));
     })
     .filter((m) => includeChildren || m.type !== "child");
 
@@ -241,6 +258,18 @@ export async function getMonitorSummary(request, redis, userId, workspaceId, cor
   const fallbackKey = isPersonalWorkspaceId(workspaceId) ? `user:${userId}:monitors` : null;
   const summary = await getWorkspaceMonitorSummary(redis, workspaceId, fallbackKey);
   return json(summary, 200, corsHeaders);
+}
+
+export async function getDashboardEvents(request, redis, userId, workspaceId, corsHeaders) {
+  const url = new URL(request.url);
+  const rawLimit = Number.parseInt(url.searchParams.get("limit") || "12", 10);
+  const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.min(rawLimit, 50)) : 12;
+  const range = url.searchParams.get("range") || "24h";
+  const items = await getWorkspaceMonitorEvents(redis, workspaceId, { limit, range });
+  return json({
+    items,
+    range: String(range).toLowerCase() === "7d" ? "7d" : "24h",
+  }, 200, corsHeaders);
 }
 
 export async function deleteMonitor(request, redis, userId, workspaceId, id, corsHeaders) {
@@ -331,7 +360,7 @@ export async function getChildMonitors(request, redis, userId, workspaceId, pare
   const uniqueIds = [...new Set(childIds)];
   const { monitors: children } = await batchGetMonitors(redis, uniqueIds);
 
-  return json(children.map((child) => attachPsiCapability(child)), 200, corsHeaders);
+  return json(children.map((child) => attachPsiCapability(toDashboardMonitor(child))), 200, corsHeaders);
 }
 
 export async function addChildMonitors(request, redis, userId, workspaceId, parentId, corsHeaders) {
@@ -397,6 +426,7 @@ export async function addChildMonitors(request, redis, userId, workspaceId, pare
       url: canonicalUrl,
       endpoints: [canonicalUrl],
       status: "PENDING",
+      lifecycleState: "created",
       createdAt: new Date().toISOString(),
     };
 
@@ -407,7 +437,8 @@ export async function addChildMonitors(request, redis, userId, workspaceId, pare
     childMonitor.lastStatusCode = firstResult.statusCode;
     childMonitor.lastErrorType = firstResult.errorType;
     childMonitor.lastContentType = firstResult.contentType || "";
-    Object.assign(childMonitor, attachPsiCapability(childMonitor, firstResult.contentType));
+    childMonitor.lifecycleState = "active";
+    Object.assign(childMonitor, attachPsiCapability(toDashboardMonitor(childMonitor), firstResult.contentType));
 
     await redis.set(`monitor:${childId}`, childMonitor);
     if (isPersonalWorkspaceId(workspaceId)) {
@@ -439,7 +470,7 @@ export async function addChildMonitors(request, redis, userId, workspaceId, pare
     });
 
     existingChildUrls.add(canonicalUrl);
-    created.push(childMonitor);
+    created.push(toDashboardMonitor(childMonitor));
   }
 
   return json({ monitors: created }, 201, corsHeaders);
@@ -493,7 +524,7 @@ export async function pingSingle(request, redis, userId, workspaceId, id, env, c
   const { historyEntry } = await pingMonitor(redis, monitor, env, {
     waitUntil: ctx?.waitUntil?.bind(ctx),
   });
-  return json({ monitor, history: historyEntry }, 200, corsHeaders);
+  return json({ monitor: toDashboardMonitor(monitor), history: historyEntry }, 200, corsHeaders);
 }
 
 // ── Workspace monitor summary (with cache) ─────────────────────────────────────
@@ -545,6 +576,7 @@ async function getWorkspaceMonitorSummary(redis, workspaceId, fallbackKey = null
 
   const payload = {
     totalMonitors: enrichedMonitors.length,
+    hasMonitors: enrichedMonitors.length > 0,
     availableNow: enrichedMonitors.filter((m) => m.status === "UP").length,
     downNow: enrichedMonitors.filter((m) => m.status === "DOWN").length,
     degradedNow: enrichedMonitors.filter((m) => m.status === "UP_RESTRICTED").length,

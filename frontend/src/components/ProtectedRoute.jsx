@@ -13,7 +13,7 @@ export default function ProtectedRoute({ children }) {
   const location = useLocation();
 
   // Firebase is still restoring the session — show skeleton instead of blank screen
-  if (loading) return <PageLoader rows={5} />;
+  if (loading && !user) return <PageLoader rows={5} />;
 
   if (!user) {
     const next = location.pathname + location.search + location.hash;

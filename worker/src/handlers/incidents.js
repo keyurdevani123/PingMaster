@@ -1,7 +1,7 @@
 import { INCIDENT_LIST_MAX_LIMIT } from "../config/constants.js";
 import { json } from "../lib/http.js";
 import { notifyIncidentLifecycle } from "../services/alerts.js";
-import { appendIncidentUpdate, hydrateIncident, normalizeIncidentSeverity } from "../services/incidents.js";
+import { appendIncidentUpdate, enrichIncidentAssignee, hydrateIncident, normalizeIncidentSeverity } from "../services/incidents.js";
 import { invalidateWorkspaceStatusPageCaches } from "../services/statusPages.js";
 import {
   ensureWorkspaceMembership,
@@ -22,6 +22,10 @@ async function canAccessWorkspaceIncident(redis, incident, userId, workspaceId) 
     incident.id,
     isPersonalWorkspaceId(workspaceId) ? `user:${userId}:incidents` : null
   );
+}
+
+function formatMemberLabel(membership, fallbackUserId = "") {
+  return membership?.displayName || membership?.email || fallbackUserId || "a workspace member";
 }
 
 async function canAccessWorkspaceMonitor(redis, monitor, userId, workspaceId) {
@@ -61,7 +65,7 @@ export async function getIncidents(request, redis, auth, workspace, membership, 
     if (!incident) continue;
     if (!(await canAccessWorkspaceIncident(redis, incident, userId, workspaceId))) continue;
     await ensureWorkspaceScopedRecord(redis, `incident:${incidentId}`, incident, workspaceId, "incidents");
-    incidents.push(incident);
+    incidents.push(await enrichIncidentAssignee(redis, incident));
   }
 
   return json(incidents, 200, corsHeaders);
@@ -110,8 +114,10 @@ export async function createIncident(request, redis, auth, workspace, membership
   const monitor = await redis.get(`monitor:${monitorId}`);
   if (!monitor) return json({ error: "Monitor not found" }, 404, corsHeaders);
   if (!(await canAccessWorkspaceMonitor(redis, monitor, userId, workspaceId))) return json({ error: "Monitor not found" }, 404, corsHeaders);
+  const assignedMembership = assignedToUserId
+    ? await getWorkspaceMembership(redis, workspaceId, assignedToUserId)
+    : null;
   if (assignedToUserId) {
-    const assignedMembership = await getWorkspaceMembership(redis, workspaceId, assignedToUserId);
     if (!assignedMembership) {
       return json({ error: "Assigned member was not found in this workspace." }, 400, corsHeaders);
     }
@@ -158,8 +164,8 @@ export async function createIncident(request, redis, auth, workspace, membership
   await redis.lpush(`monitor:${monitorId}:incidents`, incidentId);
   await appendIncidentUpdate(redis, incidentId, {
     type: "system",
-    title: "Incident created",
-    body: impactSummary || description || rootCause || "Manual incident opened.",
+    title: "Incident opened",
+    body: `Opened for ${monitor?.name || "the selected monitor"} with ${severity} severity.`,
     actorUserId: userId,
     actorName: auth.name || "",
     actorEmail: auth.email || "",
@@ -167,8 +173,8 @@ export async function createIncident(request, redis, auth, workspace, membership
   if (assignedToUserId) {
     await appendIncidentUpdate(redis, incidentId, {
       type: "system",
-      title: "Incident assigned",
-      body: `Assigned to ${assignedToUserId}.`,
+      title: "Ownership assigned",
+      body: `Assigned to ${formatMemberLabel(assignedMembership, assignedToUserId)}.`,
       actorUserId: userId,
       actorName: auth.name || "",
       actorEmail: auth.email || "",
@@ -229,9 +235,11 @@ export async function updateIncident(request, redis, auth, workspace, membership
 
     if (!nextTitle) return json({ error: "title is required" }, 400, corsHeaders);
     if (!nextSeverity) return json({ error: "severity must be critical, high, medium, or low" }, 400, corsHeaders);
+    const nextAssignedMembership = nextAssignedToUserId
+      ? await getWorkspaceMembership(redis, workspaceId, nextAssignedToUserId)
+      : null;
     if (nextAssignedToUserId) {
-      const assignedMembership = await getWorkspaceMembership(redis, workspaceId, nextAssignedToUserId);
-      if (!assignedMembership) {
+      if (!nextAssignedMembership) {
         return json({ error: "Assigned member was not found in this workspace." }, 400, corsHeaders);
       }
     }
@@ -251,7 +259,7 @@ export async function updateIncident(request, redis, auth, workspace, membership
     updateEvents.push({
       type: "system",
       title: "Incident details updated",
-      body: incident.description || incident.impactSummary || "Incident context was updated.",
+      body: "Severity, impact, or investigation details were updated.",
       actorUserId: userId,
       actorName: auth.name || "",
       actorEmail: auth.email || "",
@@ -259,9 +267,9 @@ export async function updateIncident(request, redis, auth, workspace, membership
     if (nextAssignedToUserId !== previousAssignedToUserId) {
       updateEvents.push({
         type: "system",
-        title: nextAssignedToUserId ? "Incident assigned" : "Incident unassigned",
+        title: nextAssignedToUserId ? "Ownership updated" : "Ownership removed",
         body: nextAssignedToUserId
-          ? `Assigned to ${nextAssignedToUserId}.`
+          ? `Assigned to ${formatMemberLabel(nextAssignedMembership, nextAssignedToUserId)}.`
           : "This incident is no longer assigned to a workspace member.",
         actorUserId: userId,
         actorName: auth.name || "",
@@ -297,7 +305,7 @@ export async function updateIncident(request, redis, auth, workspace, membership
     updateEvents.push({
       type: "system",
       title: "Incident resolved",
-      body: incident.fixSummary,
+      body: "The incident was marked resolved after the fix was confirmed.",
       actorUserId: userId,
       actorName: auth.name || "",
       actorEmail: auth.email || "",
@@ -311,7 +319,7 @@ export async function updateIncident(request, redis, auth, workspace, membership
     updateEvents.push({
       type: "system",
       title: "Incident reopened",
-      body: incident.resolutionNotes || "The issue came back or needs more work.",
+      body: "The incident was reopened for more investigation or follow-up work.",
       actorUserId: userId,
       actorName: auth.name || "",
       actorEmail: auth.email || "",

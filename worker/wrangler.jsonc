@@ -8,9 +8,15 @@
   // Target the latest Cloudflare Workers runtime
   "compatibility_date": "2025-01-01",
 
-  // Cron trigger — wakes up the worker automatically every 5 minutes
-  // "*/5 * * * *" is standard cron syntax: every 5 minutes, every hour, every day
+  // Persist Worker logs in Cloudflare so production failures are visible
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+
+  // Cron trigger — wakes up the worker automatically every 1 minutes
+  // "*/1 * * * *" is standard cron syntax: every 1 minutes, every hour, every day
   "triggers": {
-    "crons": ["*/5 * * * *"]
+    "crons": ["*/1 * * * *"]
   }
 }
