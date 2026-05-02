@@ -136,7 +136,7 @@ export function AuthProvider({ children }) {
       setBootstrapLoading(true);
       try {
         if (!active) return;
-        await loadBootstrap(firebaseUser, requestedWorkspaceId);
+        await loadBootstrap(firebaseUser, requestedWorkspaceId, { force: true });
       } catch (err) {
         if (!active) return;
         if (!cachedBootstrap) {
@@ -176,7 +176,7 @@ export function AuthProvider({ children }) {
     setWorkspaceSwitching(true);
     setBootstrapError("");
     try {
-      await loadBootstrap(user, workspaceId);
+      await loadBootstrap(user, workspaceId, { force: true });
     } catch (err) {
       setBootstrapError(err?.message || "Could not switch workspace.");
     } finally {

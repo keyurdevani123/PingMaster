@@ -8,6 +8,8 @@ const TERMINAL_CHECKOUT_SESSION_STATES = new Set(["captured", "failed", "cancell
 const DEFAULT_CHECKOUT_SESSION_TTL_MS = 30 * 60 * 1000;
 const DEFAULT_PLUS_AMOUNT_PAISA = 24900;
 const DEFAULT_PRO_AMOUNT_PAISA = 79900;
+const BILLING_ORDER_RECOVERY_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const BILLING_ORDER_RECOVERY_COUNT = 20;
 
 const PLAN_CONFIG = {
   [FREE_PLAN]: {
@@ -191,6 +193,8 @@ function normalizeBillingRecord(workspaceId, value = {}) {
     currentPeriodEnd: toIsoString(value?.currentPeriodEnd),
     lastWebhookEventId: value?.lastWebhookEventId || null,
     lastWebhookEventType: value?.lastWebhookEventType || null,
+    lastRecoverySyncAt: toIsoString(value?.lastRecoverySyncAt),
+    recoveredFromOrderId: value?.recoveredFromOrderId || null,
     createdAt: toIsoString(value?.createdAt) || new Date().toISOString(),
     updatedAt: toIsoString(value?.updatedAt) || new Date().toISOString(),
   };
@@ -275,6 +279,8 @@ function billingRecordsDiffer(left, right) {
     "currentPeriodEnd",
     "lastWebhookEventId",
     "lastWebhookEventType",
+    "lastRecoverySyncAt",
+    "recoveredFromOrderId",
   ];
 
   return keys.some((key) => (left?.[key] || null) !== (right?.[key] || null));
@@ -507,6 +513,25 @@ async function requestRazorpay(env, path, options = {}) {
   return payload;
 }
 
+export async function listRazorpayOrders(env, options = {}) {
+  const params = new URLSearchParams();
+  const count = Number.isFinite(options?.count)
+    ? Math.max(1, Math.min(options.count, 100))
+    : BILLING_ORDER_RECOVERY_COUNT;
+  params.set("count", String(count));
+  if (Number.isFinite(options?.skip) && options.skip > 0) {
+    params.set("skip", String(Math.trunc(options.skip)));
+  }
+  if (options?.from) {
+    const fromValue = Math.trunc(new Date(options.from).getTime() / 1000);
+    if (Number.isFinite(fromValue) && fromValue > 0) {
+      params.set("from", String(fromValue));
+    }
+  }
+  const query = params.toString();
+  return requestRazorpay(env, `/v1/orders${query ? `?${query}` : ""}`);
+}
+
 export async function createRazorpaySubscription(env, workspace, auth, options = {}) {
   const planCode = normalizePlanCode(options?.plan);
   if (planCode === FREE_PLAN) {
@@ -702,12 +727,60 @@ export async function syncWorkspaceBillingFromRazorpay(redis, workspace, env) {
     return saveWorkspaceBilling(redis, workspaceId, repaired);
   };
 
+  const attemptOrderRecovery = async () => {
+    const lastRecoveryAt = billing?.lastRecoverySyncAt ? new Date(billing.lastRecoverySyncAt).getTime() : 0;
+    if (lastRecoveryAt && Date.now() - lastRecoveryAt < BILLING_ORDER_RECOVERY_INTERVAL_MS) {
+      return persistRepairedBilling(billing);
+    }
+
+    try {
+      const since = billing?.createdAt || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+      const orderList = await listRazorpayOrders(env, { count: BILLING_ORDER_RECOVERY_COUNT, from: since });
+      const items = Array.isArray(orderList?.items) ? orderList.items : [];
+      const matchingOrders = items
+        .filter((order) => order?.notes?.workspace_id === workspaceId)
+        .filter((order) => String(order?.status || "").toLowerCase() === "paid")
+        .filter((order) => normalizePlanCode(order?.notes?.plan_code) !== FREE_PLAN)
+        .sort((left, right) => Number(right?.created_at || 0) - Number(left?.created_at || 0));
+
+      const latestOrder = matchingOrders[0];
+      if (!latestOrder) {
+        return mergeWorkspaceBilling(redis, workspaceId, {
+          lastRecoverySyncAt: new Date().toISOString(),
+        });
+      }
+
+      const recoveredPlan = normalizePlanCode(latestOrder?.notes?.plan_code);
+      return mergeWorkspaceBilling(redis, workspaceId, {
+        provider: "razorpay",
+        plan: recoveredPlan,
+        pendingPlan: null,
+        status: "active",
+        lastPaidPlan: recoveredPlan,
+        customerId: latestOrder?.notes?.owner_email || billing?.customerId || null,
+        orderId: latestOrder?.id || billing?.orderId || null,
+        currentPeriodStart: toIsoString(latestOrder?.created_at),
+        currentPeriodEnd: billing?.currentPeriodEnd || null,
+        lastRecoverySyncAt: new Date().toISOString(),
+        recoveredFromOrderId: latestOrder?.id || null,
+      });
+    } catch {
+      return persistRepairedBilling({
+        ...billing,
+        lastRecoverySyncAt: new Date().toISOString(),
+      });
+    }
+  };
+
   if (!isRazorpayConfigured(env)) {
     return persistRepairedBilling(billing);
   }
 
   const hasPendingPaidState = Boolean(billing.pendingPlan) || (billing.plan !== FREE_PLAN && !isPaidBillingStatus(billing.status));
   if (!hasPendingPaidState || (!billing.subscriptionId && !billing.paymentId)) {
+    if (billing.plan === FREE_PLAN && !billing.paymentId && !billing.subscriptionId) {
+      return attemptOrderRecovery();
+    }
     return persistRepairedBilling(billing);
   }
 

@@ -1,8 +1,8 @@
 import {
   buildBillingSummary,
   getFeatureFlags,
-  getWorkspaceBilling,
   getWorkspaceOpenBillingSession,
+  syncWorkspaceBillingFromRazorpay,
 } from "./billing.js";
 
 const PERSONAL_WORKSPACE_PREFIX = "ws_";
@@ -396,7 +396,7 @@ export async function buildBootstrapPayload(redis, auth, requestedWorkspaceId = 
       email: userEmail,
     });
   const workspaces = await listUserWorkspaces(redis, userId);
-  const billing = await getWorkspaceBilling(redis, currentWorkspace);
+  const billing = await syncWorkspaceBillingFromRazorpay(redis, currentWorkspace, env);
   const checkoutSession = currentWorkspace?.type === "team"
     ? null
     : await getWorkspaceOpenBillingSession(redis, currentWorkspace.id);
