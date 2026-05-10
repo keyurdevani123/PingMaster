@@ -1,4 +1,5 @@
 export const MONITOR_COLORS = ["#36cf9b", "#7aa2ff", "#f9b532", "#f19a89", "#b794f4", "#56d0ea"];
+export const SLOW_SERVICE_THRESHOLD_MS = 700;
 
 export function getInitial(email) {
   return email?.trim()?.charAt(0)?.toUpperCase() || "U";
@@ -220,7 +221,7 @@ export function buildSlowMonitorBars(monitors, monitorStatsMap) {
       name: monitor.name,
       avgLatency: monitorStatsMap[monitor.id]?.avgLatency24h ?? null,
     }))
-    .filter((item) => Number.isFinite(item.avgLatency))
+    .filter((item) => Number.isFinite(item.avgLatency) && item.avgLatency >= SLOW_SERVICE_THRESHOLD_MS)
     .sort((a, b) => b.avgLatency - a.avgLatency)
     .slice(0, 5);
 }

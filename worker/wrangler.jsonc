@@ -14,8 +14,8 @@
     "head_sampling_rate": 1
   },
 
-  // Cron trigger — wakes up the worker automatically every 1 minutes
-  // "*/1 * * * *" is standard cron syntax: every 1 minutes, every hour, every day
+  // Cron trigger — wakes up the worker automatically every 4 minutes
+  // "*/4 * * * *" is standard cron syntax: every 4 minutes, every hour, every day
   "triggers": {
     "crons": ["*/1 * * * *"]
   }

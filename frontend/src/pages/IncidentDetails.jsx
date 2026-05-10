@@ -107,6 +107,20 @@ export default function IncidentDetails() {
     };
   }, [incident]);
 
+  const monitorSnapshot = normalizedIncident?.monitorSnapshot || null;
+  const maintenanceContext = normalizedIncident?.maintenanceContext || null;
+  const monitorHealthMeta = useMemo(
+    () => getMonitorHealthMeta(monitorSnapshot?.status, Boolean(monitorSnapshot?.unavailable)),
+    [monitorSnapshot?.status, monitorSnapshot?.unavailable],
+  );
+  const incidentActivitySummary = useMemo(
+    () => buildIncidentActivitySummary(normalizedIncident),
+    [normalizedIncident],
+  );
+  const healthStripItems = useMemo(() => (
+    buildIncidentHealthStrip(normalizedIncident, monitorSnapshot, maintenanceContext, monitorHealthMeta)
+  ), [maintenanceContext, monitorHealthMeta, monitorSnapshot, normalizedIncident]);
+
   function openEditModal() {
     if (!normalizedIncident) return;
     setIncidentForm({
@@ -240,6 +254,8 @@ export default function IncidentDetails() {
   const cause = getIncidentCauseMeta(normalizedIncident.causeCode);
   const statusMeta = getStatusMeta(normalizedIncident.status);
   const canEdit = normalizedIncident.status === "open" || normalizedIncident.status === "acknowledged";
+  const affectedMonitorName = monitorSnapshot?.name || normalizedIncident.monitorName || "Unknown monitor";
+  const affectedMonitorUrl = monitorSnapshot?.url || normalizedIncident.monitorUrl || "";
 
   return (
     <div className="min-h-screen text-[#f2f2f2]">
@@ -273,6 +289,18 @@ export default function IncidentDetails() {
         <main className="px-4 md:px-5 py-4 lg:h-[calc(100vh-73px)] min-h-[calc(100dvh-73px)] flex flex-col gap-4">
           {error && <div className="bg-red-500/10 border border-red-500/30 text-red-300 rounded-lg p-3 text-sm shrink-0">{error}</div>}
 
+          <section className="shrink-0 grid grid-cols-2 xl:grid-cols-5 gap-3">
+            {healthStripItems.map((item) => (
+              <InfoPanel
+                key={item.label}
+                label={item.label}
+                value={item.value}
+                caption={item.caption}
+                toneClassName={item.toneClassName}
+              />
+            ))}
+          </section>
+
           <div className={`grid grid-cols-1 xl:grid-cols-2 gap-4 min-h-0 flex-1 transition-opacity duration-200 ${refreshing ? "opacity-90" : "opacity-100"}`}>
             <article className="incident-pane-scroll rounded-2xl border border-[#262b34] bg-[radial-gradient(circle_at_top_left,_rgba(77,98,255,0.14),_transparent_32%),linear-gradient(180deg,_#151922_0%,_#12161d_35%,_#12161d_100%)] shadow-[0_18px_60px_rgba(0,0,0,0.24)] min-h-0 overflow-y-auto">
               {refreshing && <div className="incident-refresh-bar" />}
@@ -294,8 +322,8 @@ export default function IncidentDetails() {
 
                 <div className="mt-5 space-y-1">
                   <p className="text-[11px] uppercase tracking-[0.08em] text-[#8d94a0]">Affected Monitor</p>
-                  <p className="text-xl font-semibold text-[#edf2fb] leading-tight">{normalizedIncident.monitorName}</p>
-                  <p className="text-sm text-[#b8c0ce] mt-1 break-all">{normalizedIncident.monitorUrl || "--"}</p>
+                  <p className="text-xl font-semibold text-[#edf2fb] leading-tight">{affectedMonitorName}</p>
+                  <p className="text-sm text-[#b8c0ce] mt-1 break-all">{affectedMonitorUrl || "--"}</p>
                 </div>
 
                 <div className="flex flex-wrap gap-2 mt-5">
@@ -350,6 +378,61 @@ export default function IncidentDetails() {
               </div>
 
               <div className="px-5 md:px-6 py-5 space-y-6">
+                <section className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                  <ContextCard title="Linked Monitor" description="Current health pulled from the latest stored monitor state.">
+                    {monitorSnapshot?.unavailable ? (
+                      <p className="text-sm text-[#8d94a0]">The linked monitor record is no longer available, but the incident history is preserved.</p>
+                    ) : (
+                      <div className="space-y-3">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className={`text-[11px] uppercase tracking-[0.08em] px-2 py-1 rounded ${monitorHealthMeta.badgeClass}`}>
+                            {monitorHealthMeta.label}
+                          </span>
+                          {monitorSnapshot?.lastErrorType ? (
+                            <span className="text-[11px] uppercase tracking-[0.08em] px-2 py-1 rounded bg-[#161b23] text-[#c6cfdb] border border-[#252a33]">
+                              {formatErrorTypeLabel(monitorSnapshot.lastErrorType)}
+                            </span>
+                          ) : null}
+                        </div>
+                        <div className="grid grid-cols-2 gap-3">
+                          <MiniStat label="Last response" value={monitorSnapshot?.lastLatency != null ? `${monitorSnapshot.lastLatency} ms` : "--"} />
+                          <MiniStat label="HTTP code" value={monitorSnapshot?.lastStatusCode ?? "--"} />
+                          <MiniStat label="24h uptime" value={Number.isFinite(monitorSnapshot?.metrics24h?.uptime24h) ? `${monitorSnapshot.metrics24h.uptime24h}%` : "--"} />
+                          <MiniStat label="24h average" value={Number.isFinite(monitorSnapshot?.metrics24h?.avgLatency24h) ? `${monitorSnapshot.metrics24h.avgLatency24h} ms` : "--"} />
+                        </div>
+                        <p className="text-xs text-[#8d94a0]">
+                          {monitorSnapshot?.lastChecked ? `Last checked ${formatTimestamp(monitorSnapshot.lastChecked)}` : "Waiting for a stored monitor check."}
+                        </p>
+                        {monitorSnapshot?.lastTransition?.timestamp ? (
+                          <p className="text-xs text-[#8d94a0]">
+                            Last state shift: {monitorSnapshot.lastTransition.from || "--"} to {monitorSnapshot.lastTransition.to || "--"} on {formatTimestamp(monitorSnapshot.lastTransition.timestamp)}
+                          </p>
+                        ) : null}
+                      </div>
+                    )}
+                  </ContextCard>
+
+                  <ContextCard title="Maintenance Context" description="Planned windows linked to this monitor are surfaced here so they do not get lost during response.">
+                    <div className="space-y-3">
+                      <MaintenanceSummaryRow
+                        label="Active window"
+                        item={maintenanceContext?.active || null}
+                        emptyText="No active maintenance window"
+                      />
+                      <MaintenanceSummaryRow
+                        label="Next scheduled"
+                        item={maintenanceContext?.nextScheduled || null}
+                        emptyText="No upcoming maintenance scheduled"
+                      />
+                      <MaintenanceSummaryRow
+                        label="Last completed"
+                        item={maintenanceContext?.recentCompleted || null}
+                        emptyText="No completed maintenance recorded"
+                      />
+                    </div>
+                  </ContextCard>
+                </section>
+
                 <div className="grid grid-cols-2 gap-x-6 gap-y-5">
                   <InfoPanel label="Opened" value={formatTimestamp(normalizedIncident.startedAt)} />
                   <InfoPanel
@@ -385,15 +468,27 @@ export default function IncidentDetails() {
                 <div>
                   <p className="text-[11px] uppercase tracking-[0.08em] text-[#8d94a0]">Response Activity</p>
                   <p className="text-sm text-[#8d94a0] mt-1">Review the sequence of system updates and team actions for this incident.</p>
-                  <p className="text-xs text-[#687080] mt-2">{normalizedIncident.updates.length} entries logged</p>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <span className="text-[11px] uppercase tracking-[0.08em] px-2 py-1 rounded bg-[#161b23] text-[#c6cfdb] border border-[#252a33]">
+                      {incidentActivitySummary.totalEntries} entries
+                    </span>
+                    <span className="text-[11px] uppercase tracking-[0.08em] px-2 py-1 rounded bg-[#161b23] text-[#c6cfdb] border border-[#252a33]">
+                      {incidentActivitySummary.teamResponses} team responses
+                    </span>
+                    <span className="text-[11px] uppercase tracking-[0.08em] px-2 py-1 rounded bg-[#161b23] text-[#c6cfdb] border border-[#252a33]">
+                      {incidentActivitySummary.latestTeamResponseLabel}
+                    </span>
+                  </div>
                 </div>
-                <button
-                  type="button"
-                  onClick={openUpdateModal}
-                  className="h-10 px-4 rounded-lg bg-[#d3d6dc] text-[#111317] text-sm font-semibold shrink-0"
-                >
-                  Add Response
-                </button>
+                <div className="flex flex-wrap items-center justify-end gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={openUpdateModal}
+                    className="h-10 px-4 rounded-lg bg-[#d3d6dc] text-[#111317] text-sm font-semibold"
+                  >
+                    Add Response
+                  </button>
+                </div>
               </div>
 
               <div className="px-5 md:px-6 py-5 space-y-4">
@@ -698,12 +793,48 @@ function DetailBlock({ title, value, emptyText }) {
   );
 }
 
-function InfoPanel({ label, value }) {
+function InfoPanel({ label, value, caption = "", toneClassName = "" }) {
   return (
-    <article className="rounded-xl border border-[#232833] bg-[#10141b]/70 px-4 py-3">
+    <article className={`rounded-xl border border-[#232833] bg-[#10141b]/70 px-4 py-3 ${toneClassName}`.trim()}>
       <p className="text-[11px] uppercase tracking-[0.08em] text-[#8d94a0]">{label}</p>
       <p className="text-sm font-medium text-[#dbe2ee] mt-2 break-words">{value || "--"}</p>
+      {caption ? <p className="text-xs text-[#7f8793] mt-2 break-words">{caption}</p> : null}
     </article>
+  );
+}
+
+function ContextCard({ title, description, children }) {
+  return (
+    <section className="rounded-xl border border-[#232833] bg-[#10141b]/70 px-4 py-4">
+      <p className="text-[11px] uppercase tracking-[0.08em] text-[#8d94a0]">{title}</p>
+      <p className="text-sm text-[#8d94a0] mt-2">{description}</p>
+      <div className="mt-4">{children}</div>
+    </section>
+  );
+}
+
+function MiniStat({ label, value }) {
+  return (
+    <div className="rounded-lg border border-[#252a33] bg-[#14181e] px-3 py-2">
+      <p className="text-[11px] uppercase tracking-[0.08em] text-[#7f8793]">{label}</p>
+      <p className="text-sm font-medium text-[#dbe2ee] mt-1">{value || "--"}</p>
+    </div>
+  );
+}
+
+function MaintenanceSummaryRow({ label, item, emptyText }) {
+  return (
+    <div className="rounded-lg border border-[#252a33] bg-[#14181e] px-3 py-3">
+      <p className="text-[11px] uppercase tracking-[0.08em] text-[#7f8793]">{label}</p>
+      {item ? (
+        <>
+          <p className="text-sm font-medium text-[#dbe2ee] mt-1">{item.title || "Scheduled maintenance"}</p>
+          <p className="text-xs text-[#8d94a0] mt-2">{formatMaintenanceTime(item)}</p>
+        </>
+      ) : (
+        <p className="text-sm text-[#8d94a0] mt-1">{emptyText}</p>
+      )}
+    </div>
   );
 }
 
@@ -866,4 +997,85 @@ function inferCauseCode(incident) {
   if (text.includes("server") || text.includes("upstream") || text.includes("deploy")) return "UPSTREAM";
   if (incident.severity === "critical" || incident.severity === "high") return "UPSTREAM";
   return "ACCESS_RESTRICTED";
+}
+
+function getMonitorHealthMeta(status, unavailable = false) {
+  if (unavailable) {
+    return {
+      label: "Unavailable",
+      badgeClass: "bg-[#2b323f] text-[#bcc5d2]",
+    };
+  }
+  if (status === "UP") return { label: "Available", badgeClass: "bg-[#123828] text-[#69e7ba]" };
+  if (status === "DOWN") return { label: "Down", badgeClass: "bg-[#402025] text-[#f6b5a8]" };
+  if (status === "UP_RESTRICTED") return { label: "Degraded", badgeClass: "bg-[#44351a] text-[#f3d088]" };
+  if (status === "MAINTENANCE") return { label: "Maintenance", badgeClass: "bg-[#3f3217] text-[#f2cf80]" };
+  return { label: "Pending", badgeClass: "bg-[#2b323f] text-[#bcc5d2]" };
+}
+
+function buildIncidentActivitySummary(incident) {
+  const entries = Array.isArray(incident?.updates) ? incident.updates : [];
+  const teamResponses = entries.filter((entry) => entry?.type !== "system");
+  const latestTeamResponse = teamResponses[0] || null;
+  return {
+    totalEntries: entries.length,
+    teamResponses: teamResponses.length,
+    latestTeamResponseLabel: latestTeamResponse?.createdAt
+      ? `Latest team note ${formatTimestamp(latestTeamResponse.createdAt)}`
+      : "No team note yet",
+  };
+}
+
+function buildIncidentHealthStrip(incident, monitorSnapshot, maintenanceContext, monitorHealthMeta) {
+  return [
+    {
+      label: "Monitor state",
+      value: monitorHealthMeta.label,
+      caption: monitorSnapshot?.lastChecked ? `Checked ${formatTimestamp(monitorSnapshot.lastChecked)}` : "Waiting for stored monitor state",
+      toneClassName: "",
+    },
+    {
+      label: "Latest latency",
+      value: monitorSnapshot?.lastLatency != null ? `${monitorSnapshot.lastLatency} ms` : "--",
+      caption: Number.isFinite(monitorSnapshot?.metrics24h?.avgLatency24h)
+        ? `24h average ${monitorSnapshot.metrics24h.avgLatency24h} ms`
+        : "No 24h average yet",
+    },
+    {
+      label: "HTTP status",
+      value: monitorSnapshot?.lastStatusCode ?? "--",
+      caption: monitorSnapshot?.lastErrorType ? formatErrorTypeLabel(monitorSnapshot.lastErrorType) : "No recent error type",
+    },
+    {
+      label: "Incident duration",
+      value: incident?.durationLabel || "--",
+      caption: incident?.status === "resolved" ? "Closed incident window" : "Still actively tracked",
+    },
+    {
+      label: "Maintenance",
+      value: maintenanceContext?.active ? "Active" : (maintenanceContext?.nextScheduled ? "Scheduled" : "None"),
+      caption: maintenanceContext?.active
+        ? `${maintenanceContext.active.title} until ${formatTimestamp(maintenanceContext.active.endsAt)}`
+        : maintenanceContext?.nextScheduled
+          ? `${maintenanceContext.nextScheduled.title} on ${formatTimestamp(maintenanceContext.nextScheduled.startsAt)}`
+          : "No linked maintenance window",
+    },
+  ];
+}
+
+function formatMaintenanceTime(item) {
+  if (!item) return "--";
+  if (item.computedStatus === "active") {
+    return `Active until ${formatTimestamp(item.endsAt)}`;
+  }
+  if (item.computedStatus === "scheduled") {
+    return `Starts ${formatTimestamp(item.startsAt)}`;
+  }
+  return `Ended ${formatTimestamp(item.endsAt)}`;
+}
+
+function formatErrorTypeLabel(value) {
+  const text = String(value || "").trim();
+  if (!text) return "--";
+  return text.replace(/_/g, " ").toLowerCase().replace(/\b\w/g, (char) => char.toUpperCase());
 }

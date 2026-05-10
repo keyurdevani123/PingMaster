@@ -9,8 +9,12 @@ const SUMMARY_WINDOW_MS = 24 * 60 * 60 * 1000;
 const DASHBOARD_EVENT_HISTORY_LIMIT = 500;
 const DISPLAYABLE_MONITOR_STATUSES = new Set(["UP", "DOWN", "UP_RESTRICTED", "MAINTENANCE"]);
 const PINGER_CURSOR_KEY = "monitor_pinger_cursor";
-const DEFAULT_SCHEDULED_PINGER_BATCH_SIZE = 4;
+const DEFAULT_SCHEDULED_PINGER_BATCH_SIZE = 1;
 const MAX_SCHEDULED_PINGER_BATCH_SIZE = 10;
+
+function markStage(stageTimings, stageName, startedAt) {
+  stageTimings[stageName] = (stageTimings[stageName] || 0) + (Date.now() - startedAt);
+}
 
 export async function validateMonitorCandidate(url) {
   try {
@@ -38,11 +42,18 @@ export async function validateMonitorCandidate(url) {
 }
 
 export async function pingMonitor(redis, monitor, env = {}, options = {}) {
+  const stageTimings = {};
+  const monitorStartedAt = Date.now();
   const previousStatus = monitor.status;
+  let stageStartedAt = Date.now();
   const activeMaintenance = await getActiveMaintenanceForMonitor(redis, monitor.id);
+  markStage(stageTimings, "maintenanceLookupMs", stageStartedAt);
+
+  stageStartedAt = Date.now();
   const result = activeMaintenance
     ? buildMaintenanceResult(activeMaintenance)
     : await checkEndpoint(monitor.url);
+  markStage(stageTimings, activeMaintenance ? "maintenanceResultBuildMs" : "endpointCheckMs", stageStartedAt);
 
   monitor.status = result.status;
   monitor.lifecycleState = "active";
@@ -62,19 +73,23 @@ export async function pingMonitor(redis, monitor, env = {}, options = {}) {
     statusCode: result.statusCode,
     errorType: result.errorType,
   };
-  await redis.lpush(`history:${monitor.id}`, historyEntry);
-  await redis.ltrim(`history:${monitor.id}`, 0, 2015);
+
+  const statusChanged = previousStatus !== result.status;
+
+  stageStartedAt = Date.now();
   const existingSummary = await loadMonitorRollingSummary(redis, monitor.id);
   const nextWindow = [
     compactSummaryEntry(historyEntry),
     ...((existingSummary?.window || []).filter(Boolean)),
   ].slice(0, SUMMARY_HISTORY_LIMIT);
   const nextSummary = buildMonitorMetricsSummaryFromWindow(nextWindow);
-  await saveMonitorRollingSummary(redis, monitor.id, {
+  const persistedSummary = {
     window: nextWindow,
     ...nextSummary,
-  });
+  };
+  markStage(stageTimings, "historyAndSummaryMs", stageStartedAt);
   monitor.metrics24h = nextSummary;
+
   if (previousStatus && previousStatus !== result.status && isDisplayableMonitorStatus(previousStatus) && isDisplayableMonitorStatus(result.status)) {
     monitor.lastTransition = {
       from: previousStatus,
@@ -83,33 +98,84 @@ export async function pingMonitor(redis, monitor, env = {}, options = {}) {
       statusCode: result.statusCode ?? null,
       errorType: result.errorType || "",
     };
+    stageStartedAt = Date.now();
     await appendWorkspaceMonitorEvent(redis, monitor, monitor.lastTransition);
+    markStage(stageTimings, "workspaceEventAppendMs", stageStartedAt);
   }
-  await redis.set(`monitor:${monitor.id}`, monitor);
-  await invalidateWorkspaceStatusPageCaches(redis, monitor.workspaceId || null);
-  if (monitor.workspaceId) {
-    await redis.del(`workspace_monitor_summary:${monitor.workspaceId}`);
+
+  stageStartedAt = Date.now();
+  await redis.pipeline()
+    .lpush(`history:${monitor.id}`, historyEntry)
+    .ltrim(`history:${monitor.id}`, 0, 2015)
+    .set(getMonitorSummaryKey(monitor.id), persistedSummary)
+    .set(`monitor:${monitor.id}`, monitor)
+    .exec();
+  markStage(stageTimings, "monitorWriteMs", stageStartedAt);
+
+  const workspaceId = monitor.workspaceId || null;
+  const shouldInvalidateStatusPages = Boolean(workspaceId) && statusChanged;
+  const shouldInvalidateWorkspaceSummary = Boolean(workspaceId);
+
+  if (options.deferWorkspaceSideEffects !== true) {
+    if (shouldInvalidateStatusPages) {
+      stageStartedAt = Date.now();
+      await invalidateWorkspaceStatusPageCaches(redis, workspaceId);
+      markStage(stageTimings, "statusPageInvalidationMs", stageStartedAt);
+    }
+    if (shouldInvalidateWorkspaceSummary) {
+      stageStartedAt = Date.now();
+      await redis.del(`workspace_monitor_summary:${workspaceId}`);
+      markStage(stageTimings, "workspaceSummaryInvalidationMs", stageStartedAt);
+    }
   }
 
   if (activeMaintenance) {
-    return { monitor, result, historyEntry };
+    return {
+      monitor,
+      result,
+      historyEntry,
+      statusChanged,
+      workspaceId,
+      shouldInvalidateStatusPages,
+      shouldInvalidateWorkspaceSummary,
+      alertProcessed: false,
+      totalDurationMs: Date.now() - monitorStartedAt,
+      stageTimings,
+    };
   }
 
-  const alertTask = processMonitorAlert(
-    redis,
+  let alertProcessed = false;
+  if (statusChanged) {
+    alertProcessed = true;
+    stageStartedAt = Date.now();
+    const alertTask = processMonitorAlert(
+      redis,
+      monitor,
+      result,
+      previousStatus,
+      env,
+      options.alertRuntimeCache || null
+    );
+    if (typeof options.waitUntil === "function") {
+      options.waitUntil(alertTask);
+    } else {
+      await alertTask;
+    }
+    markStage(stageTimings, "alertProcessingMs", stageStartedAt);
+  }
+
+  return {
     monitor,
     result,
-    previousStatus,
-    env,
-    options.alertRuntimeCache || null
-  );
-  if (typeof options.waitUntil === "function") {
-    options.waitUntil(alertTask);
-  } else {
-    await alertTask;
-  }
-
-  return { monitor, result, historyEntry };
+    historyEntry,
+    statusChanged,
+    workspaceId,
+    shouldInvalidateStatusPages,
+    shouldInvalidateWorkspaceSummary,
+    alertProcessed,
+    totalDurationMs: Date.now() - monitorStartedAt,
+    stageTimings,
+  };
 }
 
 export function isDisplayableMonitorStatus(status) {
@@ -281,8 +347,11 @@ async function appendWorkspaceMonitorEvent(redis, monitor, transition) {
     statusCode: transition.statusCode ?? null,
     errorType: transition.errorType || "",
   };
-  await redis.lpush(getWorkspaceMonitorEventsKey(workspaceId), event);
-  await redis.ltrim(getWorkspaceMonitorEventsKey(workspaceId), 0, DASHBOARD_EVENT_HISTORY_LIMIT - 1);
+  const eventsKey = getWorkspaceMonitorEventsKey(workspaceId);
+  await redis.pipeline()
+    .lpush(eventsKey, event)
+    .ltrim(eventsKey, 0, DASHBOARD_EVENT_HISTORY_LIMIT - 1)
+    .exec();
 }
 
 export async function runPinger(redis, env, options = {}) {
@@ -307,12 +376,76 @@ export async function runPinger(redis, env, options = {}) {
     : await getScheduledMonitorBatch(redis, ids, env, options.batchSize);
   const alertRuntimeCache = createAlertRuntimeCache();
   const processedMonitorIds = [];
+  const workspaceSummaryInvalidations = new Set();
+  const statusPageInvalidations = new Set();
+  const aggregateStageTimings = {};
+  let statusChanges = 0;
+  let alertsProcessed = 0;
 
-  for (const id of batch.ids) {
-    const monitor = await redis.get(`monitor:${id}`);
+  const monitorKeys = batch.ids.map((id) => `monitor:${id}`);
+  const monitors = monitorKeys.length > 0 ? await redis.mget(...monitorKeys) : [];
+
+  for (let index = 0; index < batch.ids.length; index += 1) {
+    const id = batch.ids[index];
+    console.log("pinger_monitor_start", {
+      mode,
+      index: index + 1,
+      batchCount: batch.ids.length,
+      monitorId: id,
+    });
+
+    const monitor = monitors[index];
     if (!monitor) continue;
-    await pingMonitor(redis, monitor, env, { alertRuntimeCache });
+
+    let pingResult;
+    try {
+      pingResult = await pingMonitor(redis, monitor, env, {
+        alertRuntimeCache,
+        deferWorkspaceSideEffects: true,
+      });
+    } catch (error) {
+      console.error("pinger_monitor_failed", {
+        mode,
+        index: index + 1,
+        batchCount: batch.ids.length,
+        monitorId: id,
+        message: error?.message || "Monitor ping failed.",
+      });
+      throw error;
+    }
+
+    if (pingResult?.workspaceId && pingResult.shouldInvalidateWorkspaceSummary) {
+      workspaceSummaryInvalidations.add(pingResult.workspaceId);
+    }
+    if (pingResult?.workspaceId && pingResult.shouldInvalidateStatusPages) {
+      statusPageInvalidations.add(pingResult.workspaceId);
+    }
+    if (pingResult?.statusChanged) statusChanges += 1;
+    if (pingResult?.alertProcessed) alertsProcessed += 1;
+    for (const [stageName, duration] of Object.entries(pingResult?.stageTimings || {})) {
+      aggregateStageTimings[stageName] = (aggregateStageTimings[stageName] || 0) + duration;
+    }
+
     processedMonitorIds.push(id);
+    console.log("pinger_monitor_done", {
+      mode,
+      index: index + 1,
+      batchCount: batch.ids.length,
+      monitorId: id,
+      status: pingResult?.result?.status || monitor.status,
+      statusChanged: Boolean(pingResult?.statusChanged),
+      alertProcessed: Boolean(pingResult?.alertProcessed),
+      totalDurationMs: pingResult?.totalDurationMs || null,
+      stageTimings: pingResult?.stageTimings || {},
+    });
+  }
+
+  if (workspaceSummaryInvalidations.size > 0) {
+    await redis.del(...[...workspaceSummaryInvalidations].map((workspaceId) => `workspace_monitor_summary:${workspaceId}`));
+  }
+
+  for (const workspaceId of statusPageInvalidations) {
+    await invalidateWorkspaceStatusPageCaches(redis, workspaceId);
   }
 
   console.log("pinger_run_completed", {
@@ -322,6 +455,11 @@ export async function runPinger(redis, env, options = {}) {
     processedCount: processedMonitorIds.length,
     startCursor: batch.startCursor,
     nextCursor: batch.nextCursor,
+    statusChanges,
+    alertsProcessed,
+    workspaceSummaryInvalidations: workspaceSummaryInvalidations.size,
+    statusPageInvalidations: statusPageInvalidations.size,
+    aggregateStageTimings,
   });
 
   return {
@@ -332,6 +470,11 @@ export async function runPinger(redis, env, options = {}) {
     processedMonitorIds,
     startCursor: batch.startCursor,
     nextCursor: batch.nextCursor,
+    statusChanges,
+    alertsProcessed,
+    workspaceSummaryInvalidations: workspaceSummaryInvalidations.size,
+    statusPageInvalidations: statusPageInvalidations.size,
+    aggregateStageTimings,
   };
 }
 
@@ -408,7 +551,7 @@ export async function checkEndpoint(url, retries = 3) {
 
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 15000);
+      const timeoutId = setTimeout(() => controller.abort(), 7000);
 
       const res = await fetch(url, {
         method: "GET",

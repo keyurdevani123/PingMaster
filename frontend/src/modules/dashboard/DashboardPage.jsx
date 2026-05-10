@@ -61,6 +61,7 @@ import {
   formatRangeTick,
   formatTooltipTime,
   getInitial,
+  SLOW_SERVICE_THRESHOLD_MS,
 } from "./dashboardUtils";
 
 export default function DashboardPage() {
@@ -639,10 +640,10 @@ export default function DashboardPage() {
                   <div className="mb-4 flex items-center justify-between gap-3">
                     <div>
                       <h3 className="text-xs uppercase tracking-[0.12em] text-[#8d94a0]">
-                        Slowest Services
+                        Slow Services
                       </h3>
                       <p className="text-sm text-[#7f8793] mt-1">
-                        Highest average response time over the last 24 hours
+                        Services averaging {SLOW_SERVICE_THRESHOLD_MS} ms or more over the last 24 hours
                       </p>
                     </div>
                     <div className="inline-flex items-center gap-2 text-xs text-[#7f8793]">
@@ -653,7 +654,7 @@ export default function DashboardPage() {
                   <div className="h-72">
                     {barData.length === 0 ? (
                       <div className="h-full flex items-center justify-center text-[#6f7785] text-sm">
-                        No latency data available yet.
+                        No services are above the slow-response threshold right now.
                       </div>
                     ) : (
                       <ResponsiveContainer width="100%" height="100%">

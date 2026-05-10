@@ -1,5 +1,10 @@
 export const RANGE_OPTIONS = ["24h", "7d"];
 export const NETWORK_METRICS_CACHE_TTL_MS = 10 * 60 * 1000;
+const LATENCY_SPIKE_MIN_RATIO = 0.4;
+const LATENCY_SPIKE_MIN_DELTA_MS = 250;
+const LATENCY_SPIKE_MIN_CURRENT_MS = 700;
+const LATENCY_SPIKE_MAJOR_DELTA_MS = 600;
+const LATENCY_SPIKE_MAJOR_CURRENT_MS = 1500;
 
 export function getStatusMeta(status) {
   switch (status) {
@@ -126,12 +131,19 @@ export function buildChangeEvents(history) {
     if (Number.isFinite(previous.latency) && Number.isFinite(current.latency) && previous.latency > 0) {
       const delta = current.latency - previous.latency;
       const ratio = delta / previous.latency;
-      if (delta >= 150 && ratio >= 0.4) {
+      if (
+        delta >= LATENCY_SPIKE_MIN_DELTA_MS
+        && ratio >= LATENCY_SPIKE_MIN_RATIO
+        && current.latency >= LATENCY_SPIKE_MIN_CURRENT_MS
+      ) {
         events.push({
           timestamp: current.timestamp,
           title: `Latency spike: +${Math.round(delta)} ms`,
           detail: `Latency moved from ${Math.round(previous.latency)} ms to ${Math.round(current.latency)} ms.`,
-          severity: delta >= 400 ? "major" : "minor",
+          severity:
+            delta >= LATENCY_SPIKE_MAJOR_DELTA_MS || current.latency >= LATENCY_SPIKE_MAJOR_CURRENT_MS
+              ? "major"
+              : "minor",
           causeCode: inferProbableCause("latency", previous, current),
         });
       }

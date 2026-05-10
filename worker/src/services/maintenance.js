@@ -112,9 +112,11 @@ export async function getActiveMaintenanceForMonitor(redis, monitorId, at = Date
   const ids = await redis.lrange(`monitor:${monitorId}:maintenances`, 0, MAINTENANCE_LIST_MAX_LIMIT - 1);
   if (!Array.isArray(ids) || ids.length === 0) return null;
 
-  for (const id of ids) {
-    if (!id) continue;
-    const maintenance = await redis.get(`maintenance:${id}`);
+  const uniqueIds = [...new Set(ids.filter(Boolean))];
+  if (uniqueIds.length === 0) return null;
+
+  const maintenances = await redis.mget(...uniqueIds.map((id) => `maintenance:${id}`));
+  for (const maintenance of Array.isArray(maintenances) ? maintenances : []) {
     if (!maintenance) continue;
     if (isMaintenanceActive(maintenance, at)) {
       return withComputedMaintenanceState(maintenance, at);

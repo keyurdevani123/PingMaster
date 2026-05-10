@@ -239,10 +239,10 @@ export default function BillingPage() {
   return (
     <div className="min-h-screen bg-[#08090b] text-[#f2f2f2]">
       <header className="border-b border-[#1a1d24] bg-[#0d0f13]">
-        <div className="max-w-7xl mx-auto px-6 md:px-8 py-5 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+        <div className="px-5 md:px-8 py-5 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
           <div>
-            <p className="text-[11px] uppercase tracking-[0.08em] text-[#8d94a0]">Workspace Plans</p>
-            <h1 className="mt-1 text-2xl font-semibold text-white">Plans</h1>
+            {/* <p className="text-[11px] uppercase tracking-[0.08em] text-[#8d94a0]">Workspace Plans</p> */}
+            <h1 className="mt-1 text-2xl font-semibold text-white">Workspace Plans</h1>
             <p className="mt-2 text-sm text-[#8d94a0]">Pick the plan that matches your monitor count, shared workspaces, and public status page needs.</p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -258,7 +258,7 @@ export default function BillingPage() {
         </div>
       </header>
 
-      <main className="max-w-7xl mx-auto px-6 md:px-8 py-8 space-y-6">
+      <main className="px-5 md:px-8 py-8 space-y-6">
         {loading ? (
           <PageLoader rows={4} />
         ) : (
