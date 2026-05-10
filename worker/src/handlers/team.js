@@ -1,5 +1,5 @@
 import { json } from "../lib/http.js";
-import { getBillingPlanConfig, getWorkspaceBilling, getEntitlementsForBilling } from "../services/billing.js";
+import { getBillingPlanConfig, getEntitlementsForBilling, syncWorkspaceBillingFromRazorpay } from "../services/billing.js";
 import { countOwnedTeamWorkspaces } from "../services/planUsage.js";
 import {
   createTeamWorkspace,
@@ -18,12 +18,12 @@ import {
   sendWorkspaceInviteEmail,
 } from "../services/team.js";
 
-export async function postTeamWorkspace(request, redis, auth, workspace, membership, corsHeaders) {
+export async function postTeamWorkspace(request, redis, auth, workspace, membership, env, corsHeaders) {
   if (membership?.role !== "owner") {
     return json({ error: "Only workspace owners can create team workspaces." }, 403, corsHeaders);
   }
   try {
-    const billing = await getWorkspaceBilling(redis, workspace);
+    const billing = await syncWorkspaceBillingFromRazorpay(redis, workspace, env);
     const entitlements = getEntitlementsForBilling(billing);
     if (!entitlements.canCreateTeamWorkspaces) {
       return json({ error: "Upgrade to Plus or Pro to create shared workspaces." }, 403, corsHeaders);

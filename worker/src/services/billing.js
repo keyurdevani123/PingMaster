@@ -389,10 +389,7 @@ export async function getWorkspaceOpenBillingSession(redis, workspaceId) {
 
 export function getEntitlementsForBilling(billing) {
   const planCode = getStableBillingPlanCode(billing);
-  const normalized = planCode !== FREE_PLAN && isPaidBillingStatus(billing?.status)
-    ? PLAN_CONFIG[planCode]
-    : PLAN_CONFIG[FREE_PLAN];
-  return { ...normalized.entitlements };
+  return { ...getBillingPlanConfig(planCode).entitlements };
 }
 
 export function buildBillingSummary(billing, options = {}) {

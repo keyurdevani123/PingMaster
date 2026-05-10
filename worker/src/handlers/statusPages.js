@@ -1,5 +1,5 @@
 import { json } from "../lib/http.js";
-import { getBillingPlanConfig, getEntitlementsForBilling, getWorkspaceBilling } from "../services/billing.js";
+import { getBillingPlanConfig, getEntitlementsForBilling, syncWorkspaceBillingFromRazorpay } from "../services/billing.js";
 import { countOwnedStatusPages } from "../services/planUsage.js";
 import {
   listStatusPages,
@@ -14,7 +14,7 @@ export async function getStatusPages(request, redis, auth, workspace, membership
   return json(await listStatusPages(redis, auth.userId, workspace.id), 200, corsHeaders);
 }
 
-export async function createStatusPage(request, redis, auth, workspace, membership, corsHeaders) {
+export async function createStatusPage(request, redis, auth, workspace, membership, env, corsHeaders) {
   if (!["owner", "admin"].includes(membership?.role)) {
     return json({ error: "Only workspace owners and admins can create status pages." }, 403, corsHeaders);
   }
@@ -26,7 +26,7 @@ export async function createStatusPage(request, redis, auth, workspace, membersh
     return json({ error: "Invalid JSON body" }, 400, corsHeaders);
   }
 
-  const billing = await getWorkspaceBilling(redis, workspace);
+  const billing = await syncWorkspaceBillingFromRazorpay(redis, workspace, env);
   const entitlements = getEntitlementsForBilling(billing);
   const ownedStatusPageCount = await countOwnedStatusPages(redis, auth.userId);
   if (Number.isFinite(entitlements.maxStatusPages) && ownedStatusPageCount >= entitlements.maxStatusPages) {

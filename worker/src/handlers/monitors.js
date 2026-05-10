@@ -1,5 +1,5 @@
 import { MONITOR_INDEX_KEY, MONITOR_PAGE_MAX_LIMIT } from "../config/constants.js";
-import { getBillingPlanConfig, getEntitlementsForBilling, getWorkspaceBilling } from "../services/billing.js";
+import { getBillingPlanConfig, getEntitlementsForBilling, syncWorkspaceBillingFromRazorpay } from "../services/billing.js";
 import { json } from "../lib/http.js";
 import { attachPsiCapability } from "../lib/psi.js";
 import { buildChildMonitorName, getBaseEndpoint, isStaticPath, normalizeEndpointList } from "../lib/urls.js";
@@ -101,7 +101,7 @@ function toDashboardMonitor(monitor) {
 
 // ── Handlers ───────────────────────────────────────────────────────────────────
 
-export async function addMonitor(request, redis, userId, workspaceId, corsHeaders) {
+export async function addMonitor(request, redis, userId, workspaceId, env, corsHeaders) {
   let body;
   try {
     body = await request.json();
@@ -115,7 +115,7 @@ export async function addMonitor(request, redis, userId, workspaceId, corsHeader
   }
 
   const workspace = workspaceId ? await redis.get(`workspace:${workspaceId}`) : null;
-  const billing = await getWorkspaceBilling(redis, workspace || workspaceId);
+  const billing = await syncWorkspaceBillingFromRazorpay(redis, workspace || workspaceId, env);
   const entitlements = getEntitlementsForBilling(billing);
   const ownedMonitorCount = await countOwnedMonitors(redis, userId);
   if (Number.isFinite(entitlements.maxMonitors) && ownedMonitorCount >= entitlements.maxMonitors) {

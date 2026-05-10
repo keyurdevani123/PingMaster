@@ -7,6 +7,33 @@ import { fetchSessionBootstrap, setApiWorkspaceId } from "../api";
 // This context holds the current user so any component can access it
 const AuthContext = createContext(null);
 
+const PLAN_ENTITLEMENT_FALLBACKS = {
+  free: {
+    canCreateTeamWorkspaces: false,
+    canUsePremiumAlertChannels: true,
+    canUseAiReports: false,
+    maxMonitors: 5,
+    maxStatusPages: 1,
+    maxTeamWorkspaces: 0,
+  },
+  plus: {
+    canCreateTeamWorkspaces: true,
+    canUsePremiumAlertChannels: true,
+    canUseAiReports: true,
+    maxMonitors: 20,
+    maxStatusPages: 5,
+    maxTeamWorkspaces: 5,
+  },
+  pro: {
+    canCreateTeamWorkspaces: true,
+    canUsePremiumAlertChannels: true,
+    canUseAiReports: true,
+    maxMonitors: 100,
+    maxStatusPages: 20,
+    maxTeamWorkspaces: 25,
+  },
+};
+
 function getWorkspaceStorageKey(userId) {
   return `pingmaster:workspace:${userId}`;
 }
@@ -61,6 +88,16 @@ function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+function hasRecordEntries(value) {
+  return isRecord(value) && Object.keys(value).length > 0;
+}
+
+function getPlanEntitlementFallback(planCode) {
+  const normalized = typeof planCode === "string" ? planCode.trim().toLowerCase() : "free";
+  const fallback = PLAN_ENTITLEMENT_FALLBACKS[normalized] || PLAN_ENTITLEMENT_FALLBACKS.free;
+  return { ...fallback };
+}
+
 function normalizeWorkspaceRecord(value, fallbackWorkspace) {
   if (!isRecord(value)) return fallbackWorkspace;
 
@@ -80,13 +117,17 @@ function normalizeWorkspaceRecord(value, fallbackWorkspace) {
 
 function normalizeBillingSummary(value) {
   if (!isRecord(value)) return null;
+  const normalizedPlan = typeof value.plan === "string" && value.plan.trim() ? value.plan.trim().toLowerCase() : "free";
+  const normalizedEntitlements = hasRecordEntries(value.entitlements)
+    ? value.entitlements
+    : getPlanEntitlementFallback(normalizedPlan);
   return {
     ...value,
-    entitlements: isRecord(value.entitlements) ? value.entitlements : {},
+    entitlements: normalizedEntitlements,
     availablePlans: Array.isArray(value.availablePlans) ? value.availablePlans : [],
     checkoutSession: isRecord(value.checkoutSession) ? value.checkoutSession : null,
     planLabel: typeof value.planLabel === "string" && value.planLabel.trim() ? value.planLabel.trim() : "Free",
-    plan: typeof value.plan === "string" && value.plan.trim() ? value.plan.trim().toLowerCase() : "free",
+    plan: normalizedPlan,
   };
 }
 
@@ -122,9 +163,9 @@ function normalizeBootstrapPayload(firebaseUser, bootstrap) {
     workspaces,
     featureFlags: isRecord(bootstrap.featureFlags) ? bootstrap.featureFlags : {},
     billing,
-    entitlements: isRecord(bootstrap.entitlements)
+    entitlements: hasRecordEntries(bootstrap.entitlements)
       ? bootstrap.entitlements
-      : (billing?.entitlements || {}),
+      : (billing?.entitlements || getPlanEntitlementFallback(billing?.plan)),
     currentMembershipRole: typeof bootstrap.currentMembershipRole === "string" && bootstrap.currentMembershipRole.trim()
       ? bootstrap.currentMembershipRole.trim()
       : (typeof currentWorkspace.currentRole === "string" && currentWorkspace.currentRole.trim()

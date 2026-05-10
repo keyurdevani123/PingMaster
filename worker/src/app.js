@@ -196,7 +196,7 @@ export default {
     }
 
     if (path === "/team/workspaces" && method === "POST") {
-      return postTeamWorkspace(request, redis, auth, workspace, membership, corsHeaders);
+      return postTeamWorkspace(request, redis, auth, workspace, membership, env, corsHeaders);
     }
 
     if (path === "/team/invites" && method === "GET") {
@@ -228,7 +228,7 @@ export default {
     }
 
     if (path === "/monitors" && method === "POST") {
-      return addMonitor(request, redis, userId, workspaceId, corsHeaders);
+      return addMonitor(request, redis, userId, workspaceId, env, corsHeaders);
     }
 
     if (path === "/monitors" && method === "GET") {
@@ -300,7 +300,7 @@ export default {
     }
 
     if (path === "/status-pages" && method === "POST") {
-      return createStatusPage(request, redis, auth, workspace, membership, corsHeaders);
+      return createStatusPage(request, redis, auth, workspace, membership, env, corsHeaders);
     }
 
     if (path.startsWith("/status-pages/") && method === "PATCH") {

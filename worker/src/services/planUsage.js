@@ -1,5 +1,12 @@
 import { getWorkspaceCollectionIds } from "./workspaces.js";
 
+function getLegacyCollectionFallbackKey(userId, workspace, collection) {
+  if (workspace?.type !== "personal") return null;
+  if (collection === "monitors") return `user:${userId}:monitors`;
+  if (collection === "incidents") return `user:${userId}:incidents`;
+  return null;
+}
+
 async function listOwnedWorkspaceIds(redis, userId) {
   const rawIds = await redis.lrange(`user:${userId}:workspaces`, 0, 99);
   return [...new Set((Array.isArray(rawIds) ? rawIds : []).filter(Boolean))];
@@ -21,7 +28,8 @@ async function collectOwnedCollectionIds(redis, userId, collection) {
   const ids = [];
 
   for (const workspace of workspaces) {
-    const collectionIds = await getWorkspaceCollectionIds(redis, workspace.id, collection, null, -1);
+    const fallbackKey = getLegacyCollectionFallbackKey(userId, workspace, collection);
+    const collectionIds = await getWorkspaceCollectionIds(redis, workspace.id, collection, fallbackKey, -1);
     for (const itemId of Array.isArray(collectionIds) ? collectionIds : []) {
       if (!itemId || seen.has(itemId)) continue;
       seen.add(itemId);
